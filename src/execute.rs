@@ -164,54 +164,12 @@ async fn reconstruct_commit(
         .textln("```")
         .textln("")
         .textln("## Instructions:")
-        .textln("1. Use read_file to examine current file contents if needed")
-        .textln("2. Use write_file to apply the relevant changes from the diff")
+        .textln("1. Examine current file contents if needed")
+        .textln("2. Write the relevant changes from the diff to the appropriate files")
         .textln("3. Only include changes that belong to THIS commit based on the message and hints")
         .textln("4. Leave other changes for subsequent commits")
         .textln("")
         .textln("When done, return whether you successfully applied changes.")
-        .define_tool(
-            "read_file",
-            "Read the contents of a file in the repository",
-            {
-                let repo = repo_root.to_path_buf();
-                async move |input: ReadFileInput, _cx| {
-                    let path = repo.join(&input.path);
-                    match std::fs::read_to_string(&path) {
-                        Ok(content) => Ok(ReadFileOutput {
-                            content,
-                            error: None,
-                        }),
-                        Err(e) => Ok(ReadFileOutput {
-                            content: String::new(),
-                            error: Some(e.to_string()),
-                        }),
-                    }
-                }
-            },
-            sacp::tool_fn_mut!(),
-        )
-        .define_tool(
-            "write_file",
-            "Write content to a file in the repository",
-            {
-                let repo = repo_root.to_path_buf();
-                async move |input: WriteFileInput, _cx| {
-                    let path = repo.join(&input.path);
-                    // Create parent directories if needed
-                    if let Some(parent) = path.parent() {
-                        let _ = std::fs::create_dir_all(parent);
-                    }
-                    match std::fs::write(&path, &input.content) {
-                        Ok(()) => Ok(WriteFileOutput { error: None }),
-                        Err(e) => Ok(WriteFileOutput {
-                            error: Some(e.to_string()),
-                        }),
-                    }
-                }
-            },
-            sacp::tool_fn_mut!(),
-        )
         .await
         .map_err(|e| Error::Agent {
             message: e.to_string(),
@@ -270,51 +228,10 @@ async fn reconstruct_commit(
             .textln("## Instructions:")
             .textln("1. Analyze the build error")
             .textln("2. Check if additional changes from the diff would fix it")
-            .textln("3. If you can fix it: use write_file to apply fixes")
+            .textln("3. If you can fix it: write the fixes to the appropriate files")
             .textln("4. If you're stuck (circular dependency, missing context, etc): report why")
             .textln("")
             .textln("Return can_progress=true if you applied fixes, false if stuck.")
-            .define_tool(
-                "read_file",
-                "Read the contents of a file in the repository",
-                {
-                    let repo = repo_root.to_path_buf();
-                    async move |input: ReadFileInput, _cx| {
-                        let path = repo.join(&input.path);
-                        match std::fs::read_to_string(&path) {
-                            Ok(content) => Ok(ReadFileOutput {
-                                content,
-                                error: None,
-                            }),
-                            Err(e) => Ok(ReadFileOutput {
-                                content: String::new(),
-                                error: Some(e.to_string()),
-                            }),
-                        }
-                    }
-                },
-                sacp::tool_fn_mut!(),
-            )
-            .define_tool(
-                "write_file",
-                "Write content to a file in the repository",
-                {
-                    let repo = repo_root.to_path_buf();
-                    async move |input: WriteFileInput, _cx| {
-                        let path = repo.join(&input.path);
-                        if let Some(parent) = path.parent() {
-                            let _ = std::fs::create_dir_all(parent);
-                        }
-                        match std::fs::write(&path, &input.content) {
-                            Ok(()) => Ok(WriteFileOutput { error: None }),
-                            Err(e) => Ok(WriteFileOutput {
-                                error: Some(e.to_string()),
-                            }),
-                        }
-                    }
-                },
-                sacp::tool_fn_mut!(),
-            )
             .await
             .map_err(|e| Error::Agent {
                 message: e.to_string(),
@@ -384,53 +301,12 @@ async fn finalize_remaining_changes(
         .textln("## Instructions:")
         .textln("1. Analyze which original commit each change logically belongs to")
         .textln("2. Group changes by target commit")
-        .textln("3. For each group, use write_file to apply the changes")
+        .textln("3. For each group, write the changes to the appropriate files")
         .textln("4. After each group, call create_wip_commit with the target commit number")
         .textln("5. Apply ALL changes from the diff - don't leave anything out")
         .textln("")
         .textln("The WIP commits will be named 'WIP--merge into <N>: <original message>'")
         .textln("so the user knows where to squash them during rebase -i.")
-        .define_tool(
-            "read_file",
-            "Read the contents of a file in the repository",
-            {
-                let repo = repo_root.to_path_buf();
-                async move |input: ReadFileInput, _cx| {
-                    let path = repo.join(&input.path);
-                    match std::fs::read_to_string(&path) {
-                        Ok(content) => Ok(ReadFileOutput {
-                            content,
-                            error: None,
-                        }),
-                        Err(e) => Ok(ReadFileOutput {
-                            content: String::new(),
-                            error: Some(e.to_string()),
-                        }),
-                    }
-                }
-            },
-            sacp::tool_fn_mut!(),
-        )
-        .define_tool(
-            "write_file",
-            "Write content to a file in the repository",
-            {
-                let repo = repo_root.to_path_buf();
-                async move |input: WriteFileInput, _cx| {
-                    let path = repo.join(&input.path);
-                    if let Some(parent) = path.parent() {
-                        let _ = std::fs::create_dir_all(parent);
-                    }
-                    match std::fs::write(&path, &input.content) {
-                        Ok(()) => Ok(WriteFileOutput { error: None }),
-                        Err(e) => Ok(WriteFileOutput {
-                            error: Some(e.to_string()),
-                        }),
-                    }
-                }
-            },
-            sacp::tool_fn_mut!(),
-        )
         .define_tool(
             "create_wip_commit",
             "Create a WIP commit for changes that belong to a specific original commit",
@@ -517,34 +393,6 @@ async fn finalize_remaining_changes(
 // =============================================================================
 // Tool Input/Output Types
 // =============================================================================
-
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-struct ReadFileInput {
-    /// Path to the file, relative to repository root
-    path: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-struct ReadFileOutput {
-    /// The file contents
-    content: String,
-    /// Error message if the read failed
-    error: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-struct WriteFileInput {
-    /// Path to the file, relative to repository root
-    path: String,
-    /// The content to write
-    content: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-struct WriteFileOutput {
-    /// Error message if the write failed
-    error: Option<String>,
-}
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ExtractResult {
