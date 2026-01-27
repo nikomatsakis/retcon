@@ -7,6 +7,7 @@ use determinishtic::Determinishtic;
 use sacp_tokio::AcpAgent;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::spec::{HistoryEntry, HistorySpec};
 
@@ -16,8 +17,11 @@ use crate::spec::{HistoryEntry, HistorySpec};
 /// to reconstruct it. Progress is saved back to the spec file after each
 /// commit attempt.
 pub async fn execute(spec_path: &Path) -> Result<(), Error> {
-    let content = std::fs::read_to_string(spec_path).map_err(Error::ReadSpec)?;
-    let mut spec = HistorySpec::from_toml(&content).map_err(Error::ParseSpec)?;
+    let content = std::fs::read_to_string(spec_path).map_err(|e| Error::ReadSpec {
+        path: spec_path.display().to_string(),
+        source: e,
+    })?;
+    let mut spec = HistorySpec::from_toml(&content)?;
 
     // Find where to resume
     let Some(start_idx) = spec.next_pending_commit() else {
@@ -32,21 +36,22 @@ pub async fn execute(spec_path: &Path) -> Result<(), Error> {
         spec.commits[start_idx].message
     );
 
-    // Get the repository root (parent of spec file, or current dir)
-    let repo_root = spec_path
-        .parent()
-        .unwrap_or(Path::new("."))
-        .canonicalize()
-        .map_err(Error::Io)?;
+    // Find the git repository root
+    let repo_root = find_git_root(spec_path)?;
 
     // Set up git state: create cleaned branch from merge-base if it doesn't exist
-    setup_cleaned_branch(&repo_root, &spec)?;
+    setup_cleaned_branch(&repo_root, &spec).map_err(|e| {
+        eprintln!("Git setup failed in {}", repo_root.display());
+        e
+    })?;
 
     // Connect to the LLM agent
+    println!("Connecting to LLM agent...");
     let agent = AcpAgent::zed_claude_code();
     let d = Determinishtic::new(agent)
         .await
-        .map_err(|e| Error::Agent(e.to_string()))?;
+        .map_err(|e| Error::AgentConnect { source: e.into() })?;
+    println!("Connected.");
 
     // Process each pending commit
     for commit_idx in start_idx..spec.commits.len() {
@@ -203,7 +208,9 @@ async fn reconstruct_commit(
             sacp::tool_fn_mut!(),
         )
         .await
-        .map_err(|e| Error::Agent(e.to_string()))?;
+        .map_err(|e| Error::Agent {
+            message: e.to_string(),
+        })?;
 
     if !extract_result.applied_changes {
         entries.push(HistoryEntry::Stuck(
@@ -304,7 +311,9 @@ async fn reconstruct_commit(
                 sacp::tool_fn_mut!(),
             )
             .await
-            .map_err(|e| Error::Agent(e.to_string()))?;
+            .map_err(|e| Error::Agent {
+                message: e.to_string(),
+            })?;
 
         if !assess_result.can_progress {
             // LLM is stuck
@@ -381,6 +390,35 @@ struct BuildResult {
 // Git Helper Functions (Deterministic)
 // =============================================================================
 
+/// Find the git repository root starting from the spec file's location.
+fn find_git_root(spec_path: &Path) -> Result<std::path::PathBuf, Error> {
+    // Start from spec file's directory, or current dir if it's just a filename
+    let start_dir = spec_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+
+    let output = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(start_dir)
+        .output()
+        .map_err(|e| Error::Git {
+            message: format!("failed to run git rev-parse --show-toplevel: {}", e),
+        })?;
+
+    if !output.status.success() {
+        return Err(Error::Git {
+            message: format!(
+                "not a git repository (searched from '{}')",
+                start_dir.display()
+            ),
+        });
+    }
+
+    let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(std::path::PathBuf::from(root))
+}
+
 /// Set up the cleaned branch from merge-base if it doesn't exist.
 fn setup_cleaned_branch(repo_root: &Path, spec: &HistorySpec) -> Result<(), Error> {
     // Check if cleaned branch exists
@@ -397,13 +435,12 @@ fn setup_cleaned_branch(repo_root: &Path, spec: &HistorySpec) -> Result<(), Erro
             .args(["checkout", &spec.cleaned])
             .current_dir(repo_root)
             .status()
-            .map_err(Error::Io)?;
+            .map_err(|e| Error::Git { message: format!("failed to run git checkout: {}", e) })?;
 
         if !status.success() {
-            return Err(Error::Git(format!(
-                "Failed to checkout branch {}",
-                spec.cleaned
-            )));
+            return Err(Error::Git {
+                message: format!("Failed to checkout branch {}", spec.cleaned),
+            });
         }
         println!("Checked out existing branch: {}", spec.cleaned);
     } else {
@@ -412,13 +449,15 @@ fn setup_cleaned_branch(repo_root: &Path, spec: &HistorySpec) -> Result<(), Erro
             .args(["merge-base", &spec.source, &spec.remote])
             .current_dir(repo_root)
             .output()
-            .map_err(Error::Io)?;
+            .map_err(|e| Error::Git { message: format!("failed to run git merge-base: {}", e) })?;
 
         if !output.status.success() {
-            return Err(Error::Git(format!(
-                "Failed to find merge-base between {} and {}",
-                spec.source, spec.remote
-            )));
+            return Err(Error::Git {
+                message: format!(
+                    "Failed to find merge-base between {} and {}",
+                    spec.source, spec.remote
+                ),
+            });
         }
 
         let base = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -428,13 +467,12 @@ fn setup_cleaned_branch(repo_root: &Path, spec: &HistorySpec) -> Result<(), Erro
             .args(["checkout", "-b", &spec.cleaned, &base])
             .current_dir(repo_root)
             .status()
-            .map_err(Error::Io)?;
+            .map_err(|e| Error::Git { message: format!("failed to run git checkout -b: {}", e) })?;
 
         if !status.success() {
-            return Err(Error::Git(format!(
-                "Failed to create branch {} from {}",
-                spec.cleaned, base
-            )));
+            return Err(Error::Git {
+                message: format!("Failed to create branch {} from {}", spec.cleaned, base),
+            });
         }
         println!(
             "Created branch {} from merge-base {}",
@@ -452,10 +490,12 @@ fn git_diff(repo_root: &Path, from: &str, to: &str) -> Result<String, Error> {
         .args(["diff", &format!("{}..{}", from, to)])
         .current_dir(repo_root)
         .output()
-        .map_err(Error::Io)?;
+        .map_err(|e| Error::Git { message: format!("failed to run git diff: {}", e) })?;
 
     if !output.status.success() {
-        return Err(Error::Git(format!("Failed to get diff {}..{}", from, to)));
+        return Err(Error::Git {
+            message: format!("Failed to get diff {}..{}", from, to),
+        });
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -468,10 +508,12 @@ fn git_commit(repo_root: &Path, message: &str) -> Result<String, Error> {
         .args(["add", "-A"])
         .current_dir(repo_root)
         .status()
-        .map_err(Error::Io)?;
+        .map_err(|e| Error::Git { message: format!("failed to run git add: {}", e) })?;
 
     if !status.success() {
-        return Err(Error::Git("Failed to stage changes".to_string()));
+        return Err(Error::Git {
+            message: "Failed to stage changes".to_string(),
+        });
     }
 
     // Create commit
@@ -479,10 +521,12 @@ fn git_commit(repo_root: &Path, message: &str) -> Result<String, Error> {
         .args(["commit", "-m", message])
         .current_dir(repo_root)
         .status()
-        .map_err(Error::Io)?;
+        .map_err(|e| Error::Git { message: format!("failed to run git commit: {}", e) })?;
 
     if !status.success() {
-        return Err(Error::Git("Failed to create commit".to_string()));
+        return Err(Error::Git {
+            message: "Failed to create commit".to_string(),
+        });
     }
 
     // Get the commit hash
@@ -490,7 +534,7 @@ fn git_commit(repo_root: &Path, message: &str) -> Result<String, Error> {
         .args(["rev-parse", "HEAD"])
         .current_dir(repo_root)
         .output()
-        .map_err(Error::Io)?;
+        .map_err(|e| Error::Git { message: format!("failed to run git rev-parse: {}", e) })?;
 
     let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
     Ok(hash[..8.min(hash.len())].to_string())
@@ -503,7 +547,7 @@ fn run_build(repo_root: &Path) -> Result<BuildResult, Error> {
         .args(["check"])
         .current_dir(repo_root)
         .output()
-        .map_err(Error::Io)?;
+        .map_err(|e| Error::Git { message: format!("failed to run cargo check: {}", e) })?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -517,8 +561,11 @@ fn run_build(repo_root: &Path) -> Result<BuildResult, Error> {
 
 /// Save the spec back to the TOML file.
 fn save_spec(spec_path: &Path, spec: &HistorySpec) -> Result<(), Error> {
-    let content = spec.to_toml().map_err(Error::SerializeSpec)?;
-    std::fs::write(spec_path, content).map_err(Error::Io)?;
+    let content = spec.to_toml()?;
+    std::fs::write(spec_path, &content).map_err(|e| Error::WriteSpec {
+        path: spec_path.display().to_string(),
+        source: e,
+    })?;
     Ok(())
 }
 
@@ -527,38 +574,37 @@ fn save_spec(spec_path: &Path, spec: &HistorySpec) -> Result<(), Error> {
 // =============================================================================
 
 /// Errors that can occur during execution.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum Error {
-    ReadSpec(std::io::Error),
-    ParseSpec(toml::de::Error),
-    SerializeSpec(toml::ser::Error),
-    Io(std::io::Error),
-    Git(String),
-    Agent(String),
-}
+    #[error("failed to read spec file '{path}'")]
+    ReadSpec {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
 
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Error::ReadSpec(e) => write!(f, "failed to read spec file: {e}"),
-            Error::ParseSpec(e) => write!(f, "failed to parse spec file: {e}"),
-            Error::SerializeSpec(e) => write!(f, "failed to serialize spec: {e}"),
-            Error::Io(e) => write!(f, "I/O error: {e}"),
-            Error::Git(msg) => write!(f, "git error: {msg}"),
-            Error::Agent(msg) => write!(f, "agent error: {msg}"),
-        }
-    }
-}
+    #[error("failed to parse spec file")]
+    ParseSpec(#[from] toml::de::Error),
 
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Error::ReadSpec(e) => Some(e),
-            Error::ParseSpec(e) => Some(e),
-            Error::SerializeSpec(e) => Some(e),
-            Error::Io(e) => Some(e),
-            Error::Git(_) => None,
-            Error::Agent(_) => None,
-        }
-    }
+    #[error("failed to serialize spec")]
+    SerializeSpec(#[from] toml::ser::Error),
+
+    #[error("failed to write spec to '{path}'")]
+    WriteSpec {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("git error: {message}")]
+    Git { message: String },
+
+    #[error("failed to connect to LLM agent")]
+    AgentConnect {
+        #[source]
+        source: anyhow::Error,
+    },
+
+    #[error("LLM agent error: {message}")]
+    Agent { message: String },
 }

@@ -1009,6 +1009,7 @@ dependencies = [
  "sacp-tokio",
  "schemars",
  "serde",
+ "thiserror",
  "tokio",
  "toml",
 ]

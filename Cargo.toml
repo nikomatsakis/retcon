@@ -11,5 +11,6 @@ sacp = "11.0.0-alpha.1"
 sacp-tokio = "11.0.0-alpha.1"
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
+thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 toml = "0.8"
