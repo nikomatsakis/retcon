@@ -104,7 +104,12 @@ pub async fn execute(spec_path: &Path) -> Result<(), Error> {
         }
     }
 
-    println!("\nComplete! All commits reconstructed.");
+    println!("\nAll specified commits reconstructed.");
+
+    // Catchall phase: ensure cleaned branch matches source exactly
+    finalize_remaining_changes(&d, &repo_root, &spec).await?;
+
+    println!("\nComplete! Reconstructed branch matches source.");
     Ok(())
 }
 
@@ -334,6 +339,181 @@ async fn reconstruct_commit(
     }
 }
 
+/// Finalize any remaining changes that weren't captured by the specified commits.
+///
+/// This ensures the invariant: cleaned branch must match source branch exactly.
+async fn finalize_remaining_changes(
+    d: &Determinishtic,
+    repo_root: &Path,
+    spec: &HistorySpec,
+) -> Result<(), Error> {
+    // Check if there's any remaining diff
+    let diff = git_diff(repo_root, &spec.cleaned, &spec.source)?;
+    if diff.is_empty() {
+        return Ok(());
+    }
+
+    println!("\nRemaining changes detected - creating WIP commits...");
+
+    // Build a summary of commits that were created
+    let commit_summary: String = spec
+        .commits
+        .iter()
+        .enumerate()
+        .map(|(i, c)| format!("{}. {}", i + 1, c.message))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Ask LLM to analyze and create WIP commits
+    let _result: CatchallResult = d
+        .think()
+        .textln("# Task: Create WIP commits for remaining changes")
+        .textln("")
+        .textln("The main reconstruction is complete, but some changes were missed.")
+        .textln("Your job is to apply ALL remaining changes, creating WIP commits that indicate")
+        .textln("which original commit they should be merged into during interactive rebase.")
+        .textln("")
+        .textln("## Commits that were created:")
+        .textln(&commit_summary)
+        .textln("")
+        .textln("## Remaining diff (cleaned..source):")
+        .textln("```diff")
+        .text(&diff)
+        .textln("```")
+        .textln("")
+        .textln("## Instructions:")
+        .textln("1. Analyze which original commit each change logically belongs to")
+        .textln("2. Group changes by target commit")
+        .textln("3. For each group, use write_file to apply the changes")
+        .textln("4. After each group, call create_wip_commit with the target commit number")
+        .textln("5. Apply ALL changes from the diff - don't leave anything out")
+        .textln("")
+        .textln("The WIP commits will be named 'WIP--merge into <N>: <original message>'")
+        .textln("so the user knows where to squash them during rebase -i.")
+        .define_tool(
+            "read_file",
+            "Read the contents of a file in the repository",
+            {
+                let repo = repo_root.to_path_buf();
+                async move |input: ReadFileInput, _cx| {
+                    let path = repo.join(&input.path);
+                    match std::fs::read_to_string(&path) {
+                        Ok(content) => Ok(ReadFileOutput {
+                            content,
+                            error: None,
+                        }),
+                        Err(e) => Ok(ReadFileOutput {
+                            content: String::new(),
+                            error: Some(e.to_string()),
+                        }),
+                    }
+                }
+            },
+            sacp::tool_fn_mut!(),
+        )
+        .define_tool(
+            "write_file",
+            "Write content to a file in the repository",
+            {
+                let repo = repo_root.to_path_buf();
+                async move |input: WriteFileInput, _cx| {
+                    let path = repo.join(&input.path);
+                    if let Some(parent) = path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    match std::fs::write(&path, &input.content) {
+                        Ok(()) => Ok(WriteFileOutput { error: None }),
+                        Err(e) => Ok(WriteFileOutput {
+                            error: Some(e.to_string()),
+                        }),
+                    }
+                }
+            },
+            sacp::tool_fn_mut!(),
+        )
+        .define_tool(
+            "create_wip_commit",
+            "Create a WIP commit for changes that belong to a specific original commit",
+            {
+                let repo = repo_root.to_path_buf();
+                let commits = spec.commits.clone();
+                async move |input: CreateWipCommitInput, _cx| {
+                    let target_idx = input.target_commit_number.saturating_sub(1);
+                    let target_message = commits
+                        .get(target_idx)
+                        .map(|c| c.message.as_str())
+                        .unwrap_or("unknown");
+
+                    let wip_message =
+                        format!("WIP--merge into {}: {}", input.target_commit_number, target_message);
+
+                    // Stage and commit
+                    let status = Command::new("git")
+                        .args(["add", "-A"])
+                        .current_dir(&repo)
+                        .status();
+
+                    if status.map(|s| !s.success()).unwrap_or(true) {
+                        return Ok(CreateWipCommitOutput {
+                            error: Some("Failed to stage changes".to_string()),
+                        });
+                    }
+
+                    let status = Command::new("git")
+                        .args(["commit", "-m", &wip_message])
+                        .current_dir(&repo)
+                        .status();
+
+                    if status.map(|s| !s.success()).unwrap_or(true) {
+                        return Ok(CreateWipCommitOutput {
+                            error: Some("Failed to create commit".to_string()),
+                        });
+                    }
+
+                    println!("  Created: {}", wip_message);
+                    Ok(CreateWipCommitOutput { error: None })
+                }
+            },
+            sacp::tool_fn_mut!(),
+        )
+        .await
+        .map_err(|e| Error::Agent {
+            message: e.to_string(),
+        })?;
+
+    // Check if there's still a diff after LLM's attempt
+    let remaining_diff = git_diff(repo_root, &spec.cleaned, &spec.source)?;
+    if remaining_diff.is_empty() {
+        return Ok(());
+    }
+
+    // Still have remaining changes - create a final catchall commit
+    println!("\n⚠ Some changes still remain - creating catchall commit...");
+
+    // Apply all remaining changes by checking out files from source
+    let status = Command::new("git")
+        .args(["checkout", &spec.source, "--", "."])
+        .current_dir(repo_root)
+        .status()
+        .map_err(|e| Error::Git {
+            message: format!("failed to checkout remaining files: {}", e),
+        })?;
+
+    if !status.success() {
+        return Err(Error::Git {
+            message: "Failed to checkout remaining files from source".to_string(),
+        });
+    }
+
+    git_commit(repo_root, "WIP--remaining changes (review manually)")?;
+    println!("  Created: WIP--remaining changes (review manually)");
+    println!("\n⚠ Warning: Some changes could not be automatically categorized.");
+    println!("  Please review the 'WIP--remaining changes' commit and distribute");
+    println!("  its contents to the appropriate commits during interactive rebase.");
+
+    Ok(())
+}
+
 // =============================================================================
 // Tool Input/Output Types
 // =============================================================================
@@ -384,6 +564,24 @@ struct AssessResult {
 struct BuildResult {
     success: bool,
     output: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct CreateWipCommitInput {
+    /// Which commit number (1-indexed) this change belongs to
+    target_commit_number: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct CreateWipCommitOutput {
+    /// Error message if the commit failed
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct CatchallResult {
+    /// Number of WIP commits created
+    commits_created: usize,
 }
 
 // =============================================================================
