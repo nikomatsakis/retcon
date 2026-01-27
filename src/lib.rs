@@ -1,6 +1,6 @@
-//! Herodotus: Reconstruct clean git history from messy branches using LLM assistance.
+//! Pravda: Reconstruct clean git history from messy branches using LLM assistance.
 //!
-//! Herodotus takes a history specification (TOML) describing logical commits and
+//! Pravda takes a history specification (TOML) describing logical commits and
 //! reconstructs them from a messy source branch, creating a clean history suitable
 //! for code review.
 //!

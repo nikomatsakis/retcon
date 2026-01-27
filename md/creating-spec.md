@@ -41,7 +41,7 @@ Order commits to tell a clear story:
 
 2. **One concept per commit**: Each commit should have a single purpose that can be stated clearly.
 
-3. **Buildable is nice, not required**: Ideally each commit compiles and tests pass. But conceptual clarity trumps buildability - herodotus will help fix compilation issues.
+3. **Buildable is nice, not required**: Ideally each commit compiles and tests pass. But conceptual clarity trumps buildability - pravda will help fix compilation issues.
 
 4. **Dependencies flow forward**: If commit B depends on commit A, A comes first.
 
@@ -126,7 +126,7 @@ both the check and the refresh are included together.
 
 ## Step 5: Validate the Spec
 
-Before running herodotus, sanity check:
+Before running pravda, sanity check:
 
 1. **Coverage**: Do the commits cover all the changes in the diff?
 2. **Order**: Do dependencies flow forward?

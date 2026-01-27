@@ -1,7 +1,7 @@
 //! History specification types.
 //!
 //! The spec is a TOML file that serves as both the plan AND execution state.
-//! As herodotus works, it appends to the `history` field of each commit.
+//! As pravda works, it appends to the `history` field of each commit.
 
 use serde::{Deserialize, Serialize};
 
@@ -47,6 +47,9 @@ pub enum HistoryEntry {
     /// LLM assessed it cannot proceed - needs human intervention
     Stuck(String),
 
+    /// Human resolved a stuck state - describes what changed
+    Resolved(String),
+
     /// This logical commit is done
     Complete,
 }
@@ -76,8 +79,26 @@ impl CommitSpec {
         matches!(self.history.last(), Some(HistoryEntry::Complete))
     }
 
-    /// Check if this commit is stuck (needs human intervention).
+    /// Check if this commit is stuck and awaiting human resolution.
+    ///
+    /// Returns `true` if the last entry is `Stuck`. Returns `false` if
+    /// the human has added a `Resolved` entry after the `Stuck`.
     pub fn is_stuck(&self) -> bool {
         matches!(self.history.last(), Some(HistoryEntry::Stuck(_)))
+    }
+
+    /// Check if this commit was stuck but has been resolved by a human.
+    ///
+    /// Returns `true` if the last entry is `Resolved`.
+    pub fn is_resolved(&self) -> bool {
+        matches!(self.history.last(), Some(HistoryEntry::Resolved(_)))
+    }
+
+    /// Get the resolution note if this commit was resolved.
+    pub fn resolution_note(&self) -> Option<&str> {
+        match self.history.last() {
+            Some(HistoryEntry::Resolved(note)) => Some(note),
+            _ => None,
+        }
     }
 }

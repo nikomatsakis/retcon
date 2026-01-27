@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "herodotus")]
+#[command(name = "pravda")]
 #[command(about = "Reconstruct clean git history from messy branches")]
 struct Cli {
     #[command(subcommand)]
@@ -28,10 +28,10 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Prompt => {
-            print!("{}", herodotus::prompt());
+            print!("{}", pravda::prompt());
         }
         Command::Execute { plan } => {
-            herodotus::execute(&plan).await?;
+            pravda::execute(&plan).await?;
         }
     }
 

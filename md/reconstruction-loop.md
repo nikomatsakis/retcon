@@ -1,6 +1,6 @@
 # The Reconstruction Loop
 
-Herodotus reconstructs clean history through a deterministic loop with LLM-powered steps.
+Pravda reconstructs clean history through a deterministic loop with LLM-powered steps.
 
 ## Algorithm
 
@@ -39,7 +39,7 @@ Following the patchwork philosophy ("do things deterministically that are determ
 
 ## The Fix Loop
 
-When a commit doesn't build or tests fail, herodotus enters a fix loop:
+When a commit doesn't build or tests fail, pravda enters a fix loop:
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -125,11 +125,17 @@ Options for handling WIP commits:
 
 ### Resuming After Stuck
 
-When herodotus encounters a `Stuck` entry, it:
+When pravda encounters a `Stuck` entry, it requires explicit human resolution before continuing:
 
-1. Shows the summary to the user
-2. Allows intervention (edit hints, reorder commits, manual fixes)
-3. On next run, sees history ends in `Stuck`, asks LLM to try again with fresh context
+1. **Stuck**: pravda stops and shows the summary
+2. **Intervene**: Edit hints, reorder commits, make manual fixes
+3. **Resolve**: Add a `resolved` entry to the history describing what you changed:
+   ```toml
+   { resolved = "Reordered commits to resolve circular dependency" }
+   ```
+4. **Resume**: Run pravda again - it passes your resolution note to the LLM as context
+
+If you try to resume without adding a `resolved` entry, pravda will stop immediately and remind you to add one. This ensures the LLM gets context about what changed.
 
 The TOML file is the complete state - you can edit it, inspect the history, and resume at any point.
 
@@ -147,14 +153,14 @@ During reconstruction, the LLM has access to:
 | `create_commit` | Stage all changes and commit with message |
 
 The LLM does NOT have:
-- Direct git access (herodotus manages branches)
+- Direct git access (pravda manages branches)
 - Network access
 - Ability to modify the source branch
 
 ## Example Session
 
 ```
-$ herodotus reconstruct history-spec.toml
+$ pravda reconstruct history-spec.toml
 
 Loading spec: history-spec.toml
   Source: feature-oauth
@@ -202,7 +208,7 @@ To squash WIP commits:
 ### Example: Stuck and Resume
 
 ```
-$ herodotus reconstruct history-spec.toml
+$ pravda execute history-spec.toml
 
 ...
 Commit 3/4: feat: implement OAuth flow
@@ -222,15 +228,24 @@ Commit 3/4: feat: implement OAuth flow
         TokenStore - circular dependency. The commits may need reordering,
         or these changes need to be in the same commit."
 
-  Appending Stuck to history...
-  Saving history-spec.toml...
+  ✗ Stuck - stopping
 
-Stopped at commit 3/4. See history-spec.toml for details.
+$ # Try to resume without resolving...
+$ pravda execute history-spec.toml
 
-$ # User edits hints or reorders commits...
+Resuming from commit 3/4: feat: implement OAuth flow
+  ✗ Previously stuck - add a `resolved` entry to continue
+    Edit the spec file and add after the `stuck` entry:
+    { resolved = "description of what you changed" }
+
+$ # User edits spec - combines commits 3 and 4
 $ vim history-spec.toml
+# Add: { resolved = "Combined OAuth flow and SessionManager into one commit" }
 
-$ herodotus reconstruct history-spec.toml
+$ pravda execute history-spec.toml
 
-Resuming from commit 3/4 (previously stuck)...
+Resuming from commit 3/4: feat: implement OAuth flow
+  Resolved: Combined OAuth flow and SessionManager into one commit
+  Computing diff...
+  ...
 ```

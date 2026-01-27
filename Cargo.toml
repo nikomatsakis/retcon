@@ -1,5 +1,5 @@
 [package]
-name = "herodotus"
+name = "pravda"
 version = "0.1.0"
 edition = "2024"
 
@@ -7,6 +7,9 @@ edition = "2024"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 determinishtic = "0.1.0"
+sacp = "11.0.0-alpha.1"
+sacp-tokio = "11.0.0-alpha.1"
+schemars = "1"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 toml = "0.8"

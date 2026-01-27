@@ -70,17 +70,18 @@ Each `[[commit]]` represents one logical commit in the final history, applied in
 |-------|----------|-------------|
 | `message` | Yes | The main commit message (first line) |
 | `hints` | No | Guidance for the LLM on what changes belong in this commit |
-| `history` | No | Execution log tracking commits created and status (managed by herodotus) |
+| `history` | No | Execution log tracking commits created and status (managed by pravda) |
 
 ### History Entries
 
-The `history` field is a vector that herodotus appends to as it works. Each entry is one of:
+The `history` field is a vector that pravda appends to as it works. Each entry is one of:
 
 ```rust
 enum HistoryEntry {
-    CommitCreated { hash: String },  // A commit was created (main or WIP fix)
-    Stuck { summary: String },       // LLM assessed it cannot proceed
-    Complete,                        // This logical commit is done
+    CommitCreated(String),   // A commit was created (main or WIP fix)
+    Stuck(String),           // LLM assessed it cannot proceed
+    Resolved(String),        // Human resolved the stuck state
+    Complete,                // This logical commit is done
 }
 ```
 
@@ -90,6 +91,7 @@ history = [
     { commit_created = "a1b2c3d" },
     { commit_created = "b4c5d6e" },  # WIP fix
     { stuck = "Missing type definition - may need to reorder commits" },
+    { resolved = "Reordered commits 2 and 3 to resolve dependency" },
 ]
 ```
 
@@ -100,9 +102,22 @@ The history tells you the commit's status:
 | Absent or empty | Not yet started |
 | Ends with `commit_created` | In progress, build may not pass yet |
 | Ends with `stuck` | Paused, needs human intervention |
+| Ends with `resolved` | Human addressed the issue, ready to retry |
 | Ends with `complete` | Done, proceed to next commit |
 
-When resuming, herodotus finds the first commit whose history doesn't end in `complete` and continues from there.
+When resuming, pravda finds the first commit whose history doesn't end in `complete` and continues from there.
+
+### Resolving Stuck States
+
+When pravda gets stuck, it stops and asks for human intervention. To continue:
+
+1. Read the `stuck` message to understand the problem
+2. Make changes (edit hints, reorder commits, manually fix code, etc.)
+3. Add a `resolved` entry describing what you changed:
+   ```toml
+   { resolved = "Combined commits 2 and 3 - they had circular dependencies" }
+   ```
+4. Run pravda again - it will retry with your resolution note as context
 
 ### Writing Good Hints
 

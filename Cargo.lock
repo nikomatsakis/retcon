@@ -613,18 +613,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
-name = "herodotus"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "determinishtic",
- "serde",
- "tokio",
- "toml",
-]
-
-[[package]]
 name = "http"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1009,6 +997,21 @@ name = "powerfmt"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
+
+[[package]]
+name = "pravda"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "determinishtic",
+ "sacp",
+ "sacp-tokio",
+ "schemars",
+ "serde",
+ "tokio",
+ "toml",
+]
 
 [[package]]
 name = "proc-macro2"
