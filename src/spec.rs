@@ -1,7 +1,7 @@
 //! History specification types.
 //!
 //! The spec is a TOML file that serves as both the plan AND execution state.
-//! As pravda works, it appends to the `history` field of each commit.
+//! As retcon works, it appends to the `history` field of each commit.
 
 use serde::{Deserialize, Serialize};
 

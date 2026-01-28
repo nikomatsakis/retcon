@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "pravda")]
+#[command(name = "retcon")]
 #[command(about = "Reconstruct clean git history from messy branches")]
 struct Cli {
     #[command(subcommand)]
@@ -46,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Prompt => {
-            print!("{}", pravda::prompt());
+            print!("{}", retcon::prompt());
         }
         Command::Execute {
             plan,
@@ -54,7 +54,7 @@ async fn main() -> anyhow::Result<()> {
             test_command,
             skip,
         } => {
-            let config = pravda::ExecuteConfig {
+            let config = retcon::ExecuteConfig {
                 build_command: if skip.contains(&SkipStep::Build) {
                     None
                 } else {
@@ -71,7 +71,7 @@ async fn main() -> anyhow::Result<()> {
                     )
                 },
             };
-            pravda::execute(&plan, &config).await?;
+            retcon::execute(&plan, &config).await?;
         }
     }
 

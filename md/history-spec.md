@@ -70,11 +70,11 @@ Each `[[commit]]` represents one logical commit in the final history, applied in
 |-------|----------|-------------|
 | `message` | Yes | The main commit message (first line) |
 | `hints` | No | Guidance for the LLM on what changes belong in this commit |
-| `history` | No | Execution log tracking commits created and status (managed by pravda) |
+| `history` | No | Execution log tracking commits created and status (managed by retcon) |
 
 ### History Entries
 
-The `history` field is a vector that pravda appends to as it works. Each entry is one of:
+The `history` field is a vector that retcon appends to as it works. Each entry is one of:
 
 ```rust
 enum HistoryEntry {
@@ -105,11 +105,11 @@ The history tells you the commit's status:
 | Ends with `resolved` | Human addressed the issue, ready to retry |
 | Ends with `complete` | Done, proceed to next commit |
 
-When resuming, pravda finds the first commit whose history doesn't end in `complete` and continues from there.
+When resuming, retcon finds the first commit whose history doesn't end in `complete` and continues from there.
 
 ### Resolving Stuck States
 
-When pravda gets stuck, it stops and asks for human intervention. To continue:
+When retcon gets stuck, it stops and asks for human intervention. To continue:
 
 1. Read the `stuck` message to understand the problem
 2. Make changes (edit hints, reorder commits, manually fix code, etc.)
@@ -117,7 +117,7 @@ When pravda gets stuck, it stops and asks for human intervention. To continue:
    ```toml
    { resolved = "Combined commits 2 and 3 - they had circular dependencies" }
    ```
-4. Run pravda again - it will retry with your resolution note as context
+4. Run retcon again - it will retry with your resolution note as context
 
 ### Writing Good Hints
 

@@ -1,6 +1,6 @@
 # The Reconstruction Loop
 
-Pravda reconstructs clean history through a deterministic loop with LLM-powered steps.
+Retcon reconstructs clean history through a deterministic loop with LLM-powered steps.
 
 ## Algorithm
 
@@ -39,7 +39,7 @@ Following the patchwork philosophy ("do things deterministically that are determ
 
 ## The Fix Loop
 
-When a commit doesn't build or tests fail, pravda enters a fix loop:
+When a commit doesn't build or tests fail, retcon enters a fix loop:
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -125,17 +125,17 @@ Options for handling WIP commits:
 
 ### Resuming After Stuck
 
-When pravda encounters a `Stuck` entry, it requires explicit human resolution before continuing:
+When retcon encounters a `Stuck` entry, it requires explicit human resolution before continuing:
 
-1. **Stuck**: pravda stops and shows the summary
+1. **Stuck**: retcon stops and shows the summary
 2. **Intervene**: Edit hints, reorder commits, make manual fixes
 3. **Resolve**: Add a `resolved` entry to the history describing what you changed:
    ```toml
    { resolved = "Reordered commits to resolve circular dependency" }
    ```
-4. **Resume**: Run pravda again - it passes your resolution note to the LLM as context
+4. **Resume**: Run retcon again - it passes your resolution note to the LLM as context
 
-If you try to resume without adding a `resolved` entry, pravda will stop immediately and remind you to add one. This ensures the LLM gets context about what changed.
+If you try to resume without adding a `resolved` entry, retcon will stop immediately and remind you to add one. This ensures the LLM gets context about what changed.
 
 The TOML file is the complete state - you can edit it, inspect the history, and resume at any point.
 
@@ -153,14 +153,14 @@ During reconstruction, the LLM has access to:
 | `create_commit` | Stage all changes and commit with message |
 
 The LLM does NOT have:
-- Direct git access (pravda manages branches)
+- Direct git access (retcon manages branches)
 - Network access
 - Ability to modify the source branch
 
 ## Example Session
 
 ```
-$ pravda reconstruct history-spec.toml
+$ retcon reconstruct history-spec.toml
 
 Loading spec: history-spec.toml
   Source: feature-oauth
@@ -208,7 +208,7 @@ To squash WIP commits:
 ### Example: Stuck and Resume
 
 ```
-$ pravda execute history-spec.toml
+$ retcon execute history-spec.toml
 
 ...
 Commit 3/4: feat: implement OAuth flow
@@ -231,7 +231,7 @@ Commit 3/4: feat: implement OAuth flow
   ✗ Stuck - stopping
 
 $ # Try to resume without resolving...
-$ pravda execute history-spec.toml
+$ retcon execute history-spec.toml
 
 Resuming from commit 3/4: feat: implement OAuth flow
   ✗ Previously stuck - add a `resolved` entry to continue
@@ -242,7 +242,7 @@ $ # User edits spec - combines commits 3 and 4
 $ vim history-spec.toml
 # Add: { resolved = "Combined OAuth flow and SessionManager into one commit" }
 
-$ pravda execute history-spec.toml
+$ retcon execute history-spec.toml
 
 Resuming from commit 3/4: feat: implement OAuth flow
   Resolved: Combined OAuth flow and SessionManager into one commit

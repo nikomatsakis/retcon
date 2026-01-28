@@ -1,8 +1,8 @@
-# Creating a Pravda History Specification
+# Creating a Retcon History Specification
 
 ## Overview
 
-This SOP guides you through creating a history specification for pravda, a tool that reconstructs clean git history from messy branches. The goal is to create a TOML specification that describes logical commits to reconstruct.
+This SOP guides you through creating a history specification for retcon, a tool that reconstructs clean git history from messy branches. The goal is to create a TOML specification that describes logical commits to reconstruct.
 
 ## Parameters
 
@@ -83,10 +83,10 @@ Design a commit sequence that tells a clear story, following these default princ
 
 ### 5. Write the TOML Specification
 
-Once the user approves the commit structure, write out the pravda specification file.
+Once the user approves the commit structure, write out the retcon specification file.
 
 **Constraints:**
-- You MUST write the specification to a file (suggest `pravda-spec.toml` or let user specify)
+- You MUST write the specification to a file (suggest `retcon-spec.toml` or let user specify)
 - You MUST use the following format:
 
 ```toml
@@ -124,8 +124,8 @@ hints = """
 After writing the specification, instruct the user on how to execute it.
 
 **Constraints:**
-- You MUST tell the user to run: `pravda execute <spec-file>`
-- You SHOULD remind them that pravda will:
+- You MUST tell the user to run: `retcon execute <spec-file>`
+- You SHOULD remind them that retcon will:
   - Create the clean branch from the merge-base
   - Reconstruct each commit in order
   - Run build verification after each commit

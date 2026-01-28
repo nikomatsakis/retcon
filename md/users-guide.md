@@ -1,34 +1,34 @@
 # User's Guide
 
-This guide walks you through using pravda to clean up a messy git branch.
+This guide walks you through using retcon to clean up a messy git branch.
 
 ## Prerequisites
 
 - A git repository with a messy feature branch
 - The branch has been pushed or you have a backup
-- `pravda` installed and in your PATH
-- An LLM agent available (pravda uses Claude Code by default)
+- `retcon` installed and in your PATH
+- An LLM agent available (retcon uses Claude Code by default)
 
 ## Quick Start
 
 ```bash
 # 1. Generate guidance for creating a spec
-pravda prompt > guidance.md
+retcon prompt > guidance.md
 
 # 2. Give the guidance to your agent to create a spec
 # e.g. in `my-spec.toml`
 
 # 3. Run the reconstruction
-pravda execute my-spec.toml
+retcon execute my-spec.toml
 ```
 
 ## Step 1: Create the Spec with Your Agent
 
-The `pravda prompt` command outputs guidance you can give to your LLM agent. The agent will analyze your diffs and propose a series of commits.
+The `retcon prompt` command outputs guidance you can give to your LLM agent. The agent will analyze your diffs and propose a series of commits.
 
 ```bash
 # Get the guidance prompt
-pravda prompt
+retcon prompt
 ```
 
 Give this prompt to your agent along with context about your branch:
@@ -51,7 +51,7 @@ The agent will:
 Once you've agreed on the structure, have the agent write out the TOML file:
 
 ```
-Write this plan as a pravda spec file to my-spec.toml
+Write this plan as a retcon spec file to my-spec.toml
 ```
 
 ### Manual Spec Creation
@@ -111,13 +111,13 @@ Mock provider for testing.
 3. **Specific hints**: Name files and functions, not just concepts
 4. **Note exclusions**: If a file has changes for multiple commits, say which parts belong where
 
-## Step 2: Run Pravda
+## Step 2: Run Retcon
 
 ```bash
-pravda execute my-spec.toml
+retcon execute my-spec.toml
 ```
 
-Pravda will:
+Retcon will:
 1. Create the `cleaned` branch from the merge-base
 2. For each commit in order:
    - Show the LLM the diff and your hints
@@ -129,7 +129,7 @@ Pravda will:
 
 ### Watching Progress
 
-Pravda prints progress as it works:
+Retcon prints progress as it works:
 
 ```
 Resuming from commit 1/3: refactor: extract validation
@@ -150,7 +150,7 @@ Commit 2/3: feat: add OAuth provider support
 
 ### The Spec File is State
 
-Pravda updates your spec file as it works. After running, you'll see:
+Retcon updates your spec file as it works. After running, you'll see:
 
 ```toml
 [[commit]]
@@ -173,7 +173,7 @@ history = [
 
 ## Step 3: Handle Stuck States
 
-Sometimes pravda can't proceed:
+Sometimes retcon can't proceed:
 
 ```
 Commit 2/3: feat: add OAuth provider support
@@ -197,7 +197,7 @@ history = [
 
 1. **Understand the problem**: Read the stuck message
 2. **Fix it**: Edit hints, reorder commits, or manually adjust code
-3. **Add a resolved entry**: Tell pravda what you changed
+3. **Add a resolved entry**: Tell retcon what you changed
 
 ```toml
 history = [
@@ -210,15 +210,15 @@ history = [
 4. **Resume**:
 
 ```bash
-pravda execute my-spec.toml
+retcon execute my-spec.toml
 ```
 
-Pravda will retry with your resolution note as context.
+Retcon will retry with your resolution note as context.
 
 ### If You Don't Add Resolved
 
 ```bash
-$ pravda execute my-spec.toml
+$ retcon execute my-spec.toml
 
 Resuming from commit 2/3: feat: add OAuth provider support
   ✗ Previously stuck - add a `resolved` entry to continue
@@ -246,7 +246,7 @@ git diff my-feature-branch
 
 ### Handling WIP Commits
 
-If pravda created WIP commits during fixes, you can squash them:
+If retcon created WIP commits during fixes, you can squash them:
 
 ```bash
 git checkout my-feature-branch-clean
@@ -350,5 +350,5 @@ git branch -D my-feature-branch-clean
 # Edit my-spec.toml, remove all `history = [...]` fields
 
 # Run again
-pravda execute my-spec.toml
+retcon execute my-spec.toml
 ```
