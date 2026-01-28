@@ -11,6 +11,7 @@
 //! - **Prompt**: Generate guidance for creating specifications
 
 mod execute;
+mod git;
 mod prompt;
 mod spec;
 

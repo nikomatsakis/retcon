@@ -9,6 +9,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::git::Git;
 use crate::spec::{HistoryEntry, HistorySpec};
 
 /// Execute the reconstruction loop for the given spec file.
@@ -37,13 +38,10 @@ pub async fn execute(spec_path: &Path) -> Result<(), Error> {
     );
 
     // Find the git repository root
-    let repo_root = find_git_root(spec_path)?;
+    let git = Git::discover(spec_path)?;
 
     // Set up git state: create cleaned branch from merge-base if it doesn't exist
-    setup_cleaned_branch(&repo_root, &spec).map_err(|e| {
-        eprintln!("Git setup failed in {}", repo_root.display());
-        e
-    })?;
+    setup_cleaned_branch(&git, &spec)?;
 
     // Connect to the LLM agent
     println!("Connecting to LLM agent...");
@@ -78,7 +76,7 @@ pub async fn execute(spec_path: &Path) -> Result<(), Error> {
         }
 
         // Run the reconstruction for this commit
-        let result = reconstruct_commit(&d, &repo_root, &spec, commit_idx, resolution_note).await;
+        let result = reconstruct_commit(&d, &git, &spec, commit_idx, resolution_note).await;
 
         match result {
             Ok(entries) => {
@@ -107,7 +105,7 @@ pub async fn execute(spec_path: &Path) -> Result<(), Error> {
     println!("\nAll specified commits reconstructed.");
 
     // Catchall phase: ensure cleaned branch matches source exactly
-    finalize_remaining_changes(&d, &repo_root, &spec).await?;
+    finalize_remaining_changes(&d, &git, &spec).await?;
 
     println!("\nComplete! Reconstructed branch matches source.");
     Ok(())
@@ -116,7 +114,7 @@ pub async fn execute(spec_path: &Path) -> Result<(), Error> {
 /// Reconstruct a single commit, returning history entries to append.
 async fn reconstruct_commit(
     d: &Determinishtic,
-    repo_root: &Path,
+    git: &Git,
     spec: &HistorySpec,
     commit_idx: usize,
     resolution_note: Option<&str>,
@@ -125,7 +123,7 @@ async fn reconstruct_commit(
     let mut entries = Vec::new();
 
     // Get the diff from cleaned to source
-    let diff = git_diff(repo_root, &spec.cleaned, &spec.source)?;
+    let diff = git.diff(&spec.cleaned, &spec.source)?;
     if diff.is_empty() {
         // No more changes to extract
         entries.push(HistoryEntry::Complete);
@@ -139,8 +137,7 @@ async fn reconstruct_commit(
     let resolution_context = resolution_note
         .map(|note| {
             format!(
-                "\n## Previous attempt was stuck - human provided resolution:\n{}\n\nUse this context to guide your approach.\n",
-                note
+                "\n## Previous attempt was stuck - human provided resolution:\n{note}\n\nUse this context to guide your approach.\n"
             )
         })
         .unwrap_or_default();
@@ -156,7 +153,7 @@ async fn reconstruct_commit(
         .textln("")
         .textln("## Commit to create:")
         .textln(&format!("Message: {}", commit_spec.message))
-        .textln(&format!("Hints: {}", hints))
+        .textln(&format!("Hints: {hints}"))
         .textln("")
         .textln("## Available diff (cleaned..source):")
         .textln("```diff")
@@ -183,7 +180,7 @@ async fn reconstruct_commit(
     }
 
     // Create the commit
-    let hash = git_commit(repo_root, &commit_spec.message)?;
+    let hash = git.commit(&commit_spec.message)?;
     entries.push(HistoryEntry::CommitCreated(hash));
     println!("  Created commit");
 
@@ -191,7 +188,7 @@ async fn reconstruct_commit(
     loop {
         // Run build
         println!("  Building...");
-        let build_result = run_build(repo_root)?;
+        let build_result = run_build(git.root())?;
 
         if build_result.success {
             println!("  Build passed");
@@ -202,7 +199,7 @@ async fn reconstruct_commit(
         println!("  Build failed, consulting LLM...");
 
         // Get fresh diff - maybe we need to pull more from source
-        let fresh_diff = git_diff(repo_root, &spec.cleaned, &spec.source)?;
+        let fresh_diff = git.diff(&spec.cleaned, &spec.source)?;
 
         // Ask LLM if it can make progress
         let assess_result: AssessResult = d
@@ -223,7 +220,7 @@ async fn reconstruct_commit(
             .textln("")
             .textln("## Original commit:")
             .textln(&format!("Message: {}", commit_spec.message))
-            .textln(&format!("Hints: {}", hints))
+            .textln(&format!("Hints: {hints}"))
             .textln("")
             .textln("## Instructions:")
             .textln("1. Analyze the build error")
@@ -248,7 +245,7 @@ async fn reconstruct_commit(
 
         // LLM made fixes, create a WIP commit
         let wip_message = format!("WIP: fix for {}", commit_spec.message);
-        let hash = git_commit(repo_root, &wip_message)?;
+        let hash = git.commit(&wip_message)?;
         entries.push(HistoryEntry::CommitCreated(hash));
         println!("  Created WIP commit");
 
@@ -261,11 +258,11 @@ async fn reconstruct_commit(
 /// This ensures the invariant: cleaned branch must match source branch exactly.
 async fn finalize_remaining_changes(
     d: &Determinishtic,
-    repo_root: &Path,
+    git: &Git,
     spec: &HistorySpec,
 ) -> Result<(), Error> {
     // Check if there's any remaining diff
-    let diff = git_diff(repo_root, &spec.cleaned, &spec.source)?;
+    let diff = git.diff(&spec.cleaned, &spec.source)?;
     if diff.is_empty() {
         return Ok(());
     }
@@ -280,6 +277,11 @@ async fn finalize_remaining_changes(
         .map(|(i, c)| format!("{}. {}", i + 1, c.message))
         .collect::<Vec<_>>()
         .join("\n");
+
+    // We need the root path for the tool closure
+    let repo_root = git.root().to_path_buf();
+    let commits = spec.commits.clone();
+    let source = spec.source.clone();
 
     // Ask LLM to analyze and create WIP commits
     let _result: CatchallResult = d
@@ -311,8 +313,8 @@ async fn finalize_remaining_changes(
             "create_wip_commit",
             "Create a WIP commit for changes that belong to a specific original commit",
             {
-                let repo = repo_root.to_path_buf();
-                let commits = spec.commits.clone();
+                let repo = repo_root.clone();
+                let commits = commits.clone();
                 async move |input: CreateWipCommitInput, _cx| {
                     let target_idx = input.target_commit_number.saturating_sub(1);
                     let target_message = commits
@@ -358,7 +360,7 @@ async fn finalize_remaining_changes(
         })?;
 
     // Check if there's still a diff after LLM's attempt
-    let remaining_diff = git_diff(repo_root, &spec.cleaned, &spec.source)?;
+    let remaining_diff = git.diff(&spec.cleaned, &spec.source)?;
     if remaining_diff.is_empty() {
         return Ok(());
     }
@@ -367,21 +369,9 @@ async fn finalize_remaining_changes(
     println!("\n⚠ Some changes still remain - creating catchall commit...");
 
     // Apply all remaining changes by checking out files from source
-    let status = Command::new("git")
-        .args(["checkout", &spec.source, "--", "."])
-        .current_dir(repo_root)
-        .status()
-        .map_err(|e| Error::Git {
-            message: format!("failed to checkout remaining files: {}", e),
-        })?;
+    git.checkout_files(&source, ".")?;
+    let _hash = git.commit("WIP--remaining changes (review manually)")?;
 
-    if !status.success() {
-        return Err(Error::Git {
-            message: "Failed to checkout remaining files from source".to_string(),
-        });
-    }
-
-    git_commit(repo_root, "WIP--remaining changes (review manually)")?;
     println!("  Created: WIP--remaining changes (review manually)");
     println!("\n⚠ Warning: Some changes could not be automatically categorized.");
     println!("  Please review the 'WIP--remaining changes' commit and distribute");
@@ -433,157 +423,24 @@ struct CatchallResult {
 }
 
 // =============================================================================
-// Git Helper Functions (Deterministic)
+// Helper Functions
 // =============================================================================
 
-/// Find the git repository root starting from the spec file's location.
-fn find_git_root(spec_path: &Path) -> Result<std::path::PathBuf, Error> {
-    // Start from spec file's directory, or current dir if it's just a filename
-    let start_dir = spec_path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-
-    let output = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(start_dir)
-        .output()
-        .map_err(|e| Error::Git {
-            message: format!("failed to run git rev-parse --show-toplevel: {}", e),
-        })?;
-
-    if !output.status.success() {
-        return Err(Error::Git {
-            message: format!(
-                "not a git repository (searched from '{}')",
-                start_dir.display()
-            ),
-        });
-    }
-
-    let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok(std::path::PathBuf::from(root))
-}
-
 /// Set up the cleaned branch from merge-base if it doesn't exist.
-fn setup_cleaned_branch(repo_root: &Path, spec: &HistorySpec) -> Result<(), Error> {
-    // Check if cleaned branch exists
-    let exists = Command::new("git")
-        .args(["rev-parse", "--verify", &spec.cleaned])
-        .current_dir(repo_root)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    if exists {
-        // Checkout the cleaned branch
-        let status = Command::new("git")
-            .args(["checkout", &spec.cleaned])
-            .current_dir(repo_root)
-            .status()
-            .map_err(|e| Error::Git { message: format!("failed to run git checkout: {}", e) })?;
-
-        if !status.success() {
-            return Err(Error::Git {
-                message: format!("Failed to checkout branch {}", spec.cleaned),
-            });
-        }
+fn setup_cleaned_branch(git: &Git, spec: &HistorySpec) -> Result<(), Error> {
+    if git.ref_exists(&spec.cleaned) {
+        git.checkout(&spec.cleaned)?;
         println!("Checked out existing branch: {}", spec.cleaned);
     } else {
-        // Find merge-base
-        let output = Command::new("git")
-            .args(["merge-base", &spec.source, &spec.remote])
-            .current_dir(repo_root)
-            .output()
-            .map_err(|e| Error::Git { message: format!("failed to run git merge-base: {}", e) })?;
-
-        if !output.status.success() {
-            return Err(Error::Git {
-                message: format!(
-                    "Failed to find merge-base between {} and {}",
-                    spec.source, spec.remote
-                ),
-            });
-        }
-
-        let base = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-        // Create and checkout the cleaned branch from merge-base
-        let status = Command::new("git")
-            .args(["checkout", "-b", &spec.cleaned, &base])
-            .current_dir(repo_root)
-            .status()
-            .map_err(|e| Error::Git { message: format!("failed to run git checkout -b: {}", e) })?;
-
-        if !status.success() {
-            return Err(Error::Git {
-                message: format!("Failed to create branch {} from {}", spec.cleaned, base),
-            });
-        }
+        let base = git.merge_base(&spec.source, &spec.remote)?;
+        git.checkout_new_branch(&spec.cleaned, &base)?;
         println!(
             "Created branch {} from merge-base {}",
             spec.cleaned,
             &base[..8.min(base.len())]
         );
     }
-
     Ok(())
-}
-
-/// Get the diff between two refs.
-fn git_diff(repo_root: &Path, from: &str, to: &str) -> Result<String, Error> {
-    let output = Command::new("git")
-        .args(["diff", &format!("{}..{}", from, to)])
-        .current_dir(repo_root)
-        .output()
-        .map_err(|e| Error::Git { message: format!("failed to run git diff: {}", e) })?;
-
-    if !output.status.success() {
-        return Err(Error::Git {
-            message: format!("Failed to get diff {}..{}", from, to),
-        });
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
-/// Stage all changes and create a commit.
-fn git_commit(repo_root: &Path, message: &str) -> Result<String, Error> {
-    // Stage all changes
-    let status = Command::new("git")
-        .args(["add", "-A"])
-        .current_dir(repo_root)
-        .status()
-        .map_err(|e| Error::Git { message: format!("failed to run git add: {}", e) })?;
-
-    if !status.success() {
-        return Err(Error::Git {
-            message: "Failed to stage changes".to_string(),
-        });
-    }
-
-    // Create commit
-    let status = Command::new("git")
-        .args(["commit", "-m", message])
-        .current_dir(repo_root)
-        .status()
-        .map_err(|e| Error::Git { message: format!("failed to run git commit: {}", e) })?;
-
-    if !status.success() {
-        return Err(Error::Git {
-            message: "Failed to create commit".to_string(),
-        });
-    }
-
-    // Get the commit hash
-    let output = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(repo_root)
-        .output()
-        .map_err(|e| Error::Git { message: format!("failed to run git rev-parse: {}", e) })?;
-
-    let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok(hash[..8.min(hash.len())].to_string())
 }
 
 /// Run the build command.
@@ -593,15 +450,14 @@ fn run_build(repo_root: &Path) -> Result<BuildResult, Error> {
         .args(["check"])
         .current_dir(repo_root)
         .output()
-        .map_err(|e| Error::Git { message: format!("failed to run cargo check: {}", e) })?;
+        .map_err(|e| Error::Build(format!("failed to run cargo check: {e}")))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let combined = format!("{}\n{}", stdout, stderr);
 
     Ok(BuildResult {
         success: output.status.success(),
-        output: combined,
+        output: format!("{stdout}\n{stderr}"),
     })
 }
 
@@ -642,8 +498,11 @@ pub enum Error {
         source: std::io::Error,
     },
 
-    #[error("git error: {message}")]
-    Git { message: String },
+    #[error("git: {0}")]
+    Git(#[from] crate::git::Error),
+
+    #[error("build: {0}")]
+    Build(String),
 
     #[error("failed to connect to LLM agent")]
     AgentConnect {
