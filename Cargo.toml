@@ -1,12 +1,13 @@
 [package]
 name = "retcon"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Turn messy development commits into clean, logical history. Because you knew what you were doing the whole time."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/nikomatsakis/retcon"
 keywords = ["git", "history", "llm", "commits"]
 categories = ["development-tools", "command-line-utilities"]
+readme = "README.md"
 
 [dependencies]
 anyhow = "1"
