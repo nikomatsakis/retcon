@@ -1,7 +1,7 @@
 //! Execute the history reconstruction loop.
 
 use std::path::Path;
-use std::process::Command;
+use std::process::Command as StdCommand;
 
 use determinishtic::Determinishtic;
 use sacp_tokio::AcpAgent;
@@ -12,12 +12,21 @@ use thiserror::Error;
 use crate::git::Git;
 use crate::spec::{HistoryEntry, HistorySpec};
 
+/// Configuration for the execute command.
+#[derive(Debug, Clone)]
+pub struct ExecuteConfig {
+    /// Build command to run after each commit. None means skip build.
+    pub build_command: Option<String>,
+    /// Test command to run after build passes. None means skip tests.
+    pub test_command: Option<String>,
+}
+
 /// Execute the reconstruction loop for the given spec file.
 ///
 /// This reads the spec, finds the next pending commit, and uses the LLM
 /// to reconstruct it. Progress is saved back to the spec file after each
 /// commit attempt.
-pub async fn execute(spec_path: &Path) -> Result<(), Error> {
+pub async fn execute(spec_path: &Path, config: &ExecuteConfig) -> Result<(), Error> {
     let content = std::fs::read_to_string(spec_path).map_err(|e| Error::ReadSpec {
         path: spec_path.display().to_string(),
         source: e,
@@ -76,7 +85,7 @@ pub async fn execute(spec_path: &Path) -> Result<(), Error> {
         }
 
         // Run the reconstruction for this commit
-        let result = reconstruct_commit(&d, &git, &spec, commit_idx, resolution_note).await;
+        let result = reconstruct_commit(&d, &git, &spec, commit_idx, resolution_note, config).await;
 
         match result {
             Ok(entries) => {
@@ -118,6 +127,7 @@ async fn reconstruct_commit(
     spec: &HistorySpec,
     commit_idx: usize,
     resolution_note: Option<&str>,
+    config: &ExecuteConfig,
 ) -> Result<Vec<HistoryEntry>, Error> {
     let commit_spec = &spec.commits[commit_idx];
     let mut entries = Vec::new();
@@ -184,73 +194,109 @@ async fn reconstruct_commit(
     entries.push(HistoryEntry::CommitCreated(hash));
     println!("  Created commit");
 
-    // Enter the fix loop
+    // Enter the verify/fix loop
     loop {
-        // Run build
-        println!("  Building...");
-        let build_result = run_build(git.root())?;
+        // Run build if configured
+        if let Some(build_cmd) = &config.build_command {
+            println!("  Building...");
+            let build_result = run_command(git.root(), build_cmd)?;
 
-        if build_result.success {
+            if !build_result.success {
+                println!("  Build failed, consulting LLM...");
+                if !try_fix(d, git, spec, commit_spec, hints, &build_result, &mut entries).await? {
+                    return Ok(entries);
+                }
+                // LLM made fixes, loop continues to re-verify
+                continue;
+            }
             println!("  Build passed");
-            entries.push(HistoryEntry::Complete);
-            return Ok(entries);
         }
 
-        println!("  Build failed, consulting LLM...");
+        // Run tests if configured
+        if let Some(test_cmd) = &config.test_command {
+            println!("  Testing...");
+            let test_result = run_command(git.root(), test_cmd)?;
 
-        // Get fresh diff - maybe we need to pull more from source
-        let fresh_diff = git.diff(&spec.cleaned, &spec.source)?;
-
-        // Ask LLM if it can make progress
-        let assess_result: AssessResult = d
-            .think()
-            .textln("# Task: Fix build failure or report stuck")
-            .textln("")
-            .textln("The build failed after applying changes. You need to either fix it or report that you're stuck.")
-            .textln("")
-            .textln("## Build output:")
-            .textln("```")
-            .text(&build_result.output)
-            .textln("```")
-            .textln("")
-            .textln("## Remaining diff (cleaned..source):")
-            .textln("```diff")
-            .text(&fresh_diff)
-            .textln("```")
-            .textln("")
-            .textln("## Original commit:")
-            .textln(&format!("Message: {}", commit_spec.message))
-            .textln(&format!("Hints: {hints}"))
-            .textln("")
-            .textln("## Instructions:")
-            .textln("1. Analyze the build error")
-            .textln("2. Check if additional changes from the diff would fix it")
-            .textln("3. If you can fix it: write the fixes to the appropriate files")
-            .textln("4. If you're stuck (circular dependency, missing context, etc): report why")
-            .textln("")
-            .textln("Return can_progress=true if you applied fixes, false if stuck.")
-            .await
-            .map_err(|e| Error::Agent {
-                message: e.to_string(),
-            })?;
-
-        if !assess_result.can_progress {
-            // LLM is stuck
-            let reason = assess_result
-                .stuck_reason
-                .unwrap_or_else(|| "Unknown reason".to_string());
-            entries.push(HistoryEntry::Stuck(reason));
-            return Ok(entries);
+            if !test_result.success {
+                println!("  Tests failed, consulting LLM...");
+                if !try_fix(d, git, spec, commit_spec, hints, &test_result, &mut entries).await? {
+                    return Ok(entries);
+                }
+                // LLM made fixes, loop continues to re-verify
+                continue;
+            }
+            println!("  Tests passed");
         }
 
-        // LLM made fixes, create a WIP commit
-        let wip_message = format!("WIP: fix for {}", commit_spec.message);
-        let hash = git.commit(&wip_message)?;
-        entries.push(HistoryEntry::CommitCreated(hash));
-        println!("  Created WIP commit");
-
-        // Loop continues to re-run build
+        // Both build and test passed (or were skipped)
+        entries.push(HistoryEntry::Complete);
+        return Ok(entries);
     }
+}
+
+/// Try to fix a build/test failure using the LLM.
+/// Returns true if progress was made, false if stuck.
+async fn try_fix(
+    d: &Determinishtic,
+    git: &Git,
+    spec: &HistorySpec,
+    commit_spec: &crate::spec::CommitSpec,
+    hints: &str,
+    failure: &CommandResult,
+    entries: &mut Vec<HistoryEntry>,
+) -> Result<bool, Error> {
+    // Get fresh diff - maybe we need to pull more from source
+    let fresh_diff = git.diff(&spec.cleaned, &spec.source)?;
+
+    // Ask LLM if it can make progress
+    let assess_result: AssessResult = d
+        .think()
+        .textln("# Task: Fix build/test failure or report stuck")
+        .textln("")
+        .textln("The build or tests failed after applying changes. You need to either fix it or report that you're stuck.")
+        .textln("")
+        .textln("## Command output:")
+        .textln("```")
+        .text(&failure.output)
+        .textln("```")
+        .textln("")
+        .textln("## Remaining diff (cleaned..source):")
+        .textln("```diff")
+        .text(&fresh_diff)
+        .textln("```")
+        .textln("")
+        .textln("## Original commit:")
+        .textln(&format!("Message: {}", commit_spec.message))
+        .textln(&format!("Hints: {hints}"))
+        .textln("")
+        .textln("## Instructions:")
+        .textln("1. Analyze the error")
+        .textln("2. Check if additional changes from the diff would fix it")
+        .textln("3. If you can fix it: write the fixes to the appropriate files")
+        .textln("4. If you're stuck (circular dependency, missing context, etc): report why")
+        .textln("")
+        .textln("Return can_progress=true if you applied fixes, false if stuck.")
+        .await
+        .map_err(|e| Error::Agent {
+            message: e.to_string(),
+        })?;
+
+    if !assess_result.can_progress {
+        // LLM is stuck
+        let reason = assess_result
+            .stuck_reason
+            .unwrap_or_else(|| "Unknown reason".to_string());
+        entries.push(HistoryEntry::Stuck(reason));
+        return Ok(false);
+    }
+
+    // LLM made fixes, create a WIP commit
+    let wip_message = format!("WIP: fix for {}", commit_spec.message);
+    let hash = git.commit(&wip_message)?;
+    entries.push(HistoryEntry::CommitCreated(hash));
+    println!("  Created WIP commit");
+
+    Ok(true)
 }
 
 /// Finalize any remaining changes that weren't captured by the specified commits.
@@ -325,7 +371,7 @@ async fn finalize_remaining_changes(
                         format!("WIP--merge into {}: {}", input.target_commit_number, target_message);
 
                     // Stage and commit
-                    let status = Command::new("git")
+                    let status = StdCommand::new("git")
                         .args(["add", "-A"])
                         .current_dir(&repo)
                         .status();
@@ -336,7 +382,7 @@ async fn finalize_remaining_changes(
                         });
                     }
 
-                    let status = Command::new("git")
+                    let status = StdCommand::new("git")
                         .args(["commit", "-m", &wip_message])
                         .current_dir(&repo)
                         .status();
@@ -398,7 +444,7 @@ struct AssessResult {
 }
 
 #[derive(Debug)]
-struct BuildResult {
+struct CommandResult {
     success: bool,
     output: String,
 }
@@ -442,19 +488,24 @@ fn setup_cleaned_branch(git: &Git, spec: &HistorySpec) -> Result<(), Error> {
     Ok(())
 }
 
-/// Run the build command.
-fn run_build(repo_root: &Path) -> Result<BuildResult, Error> {
-    // TODO: Make build command configurable in spec
-    let output = Command::new("cargo")
-        .args(["check"])
+/// Run a shell command and capture output.
+fn run_command(repo_root: &Path, command: &str) -> Result<CommandResult, Error> {
+    // Parse command into program and args (simple shell-style splitting)
+    let parts: Vec<&str> = command.split_whitespace().collect();
+    let (program, args) = parts
+        .split_first()
+        .ok_or_else(|| Error::Command(format!("empty command: {command}")))?;
+
+    let output = StdCommand::new(program)
+        .args(args)
         .current_dir(repo_root)
         .output()
-        .map_err(|e| Error::Build(format!("failed to run cargo check: {e}")))?;
+        .map_err(|e| Error::Command(format!("failed to run '{command}': {e}")))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    Ok(BuildResult {
+    Ok(CommandResult {
         success: output.status.success(),
         output: format!("{stdout}\n{stderr}"),
     })
@@ -500,8 +551,8 @@ pub enum Error {
     #[error("git: {0}")]
     Git(#[from] crate::git::Error),
 
-    #[error("build: {0}")]
-    Build(String),
+    #[error("command: {0}")]
+    Command(String),
 
     #[error("failed to connect to LLM agent")]
     AgentConnect {
