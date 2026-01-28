@@ -72,7 +72,7 @@ pub async fn execute(spec_path: &Path) -> Result<(), Error> {
         // If resolved, include the resolution note in context
         let resolution_note = commit_spec.resolution_note();
         if let Some(note) = resolution_note {
-            println!("  Resolved: {}", note);
+            println!("  Resolved: {note}");
         }
 
         // Run the reconstruction for this commit
@@ -319,8 +319,7 @@ async fn finalize_remaining_changes(
                     let target_idx = input.target_commit_number.saturating_sub(1);
                     let target_message = commits
                         .get(target_idx)
-                        .map(|c| c.message.as_str())
-                        .unwrap_or("unknown");
+                        .map_or("unknown", |c| c.message.as_str());
 
                     let wip_message =
                         format!("WIP--merge into {}: {}", input.target_commit_number, target_message);
@@ -348,7 +347,7 @@ async fn finalize_remaining_changes(
                         });
                     }
 
-                    println!("  Created: {}", wip_message);
+                    println!("  Created: {wip_message}");
                     Ok(CreateWipCommitOutput { error: None })
                 }
             },

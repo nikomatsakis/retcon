@@ -68,6 +68,7 @@ impl HistorySpec {
     /// Find the index of the first commit that isn't complete.
     ///
     /// Returns `None` if all commits are complete.
+    #[must_use]
     pub fn next_pending_commit(&self) -> Option<usize> {
         self.commits.iter().position(|c| !c.is_complete())
     }
@@ -75,6 +76,7 @@ impl HistorySpec {
 
 impl CommitSpec {
     /// Check if this commit is complete.
+    #[must_use]
     pub fn is_complete(&self) -> bool {
         matches!(self.history.last(), Some(HistoryEntry::Complete))
     }
@@ -83,6 +85,7 @@ impl CommitSpec {
     ///
     /// Returns `true` if the last entry is `Stuck`. Returns `false` if
     /// the human has added a `Resolved` entry after the `Stuck`.
+    #[must_use]
     pub fn is_stuck(&self) -> bool {
         matches!(self.history.last(), Some(HistoryEntry::Stuck(_)))
     }
@@ -90,11 +93,13 @@ impl CommitSpec {
     /// Check if this commit was stuck but has been resolved by a human.
     ///
     /// Returns `true` if the last entry is `Resolved`.
+    #[must_use]
     pub fn is_resolved(&self) -> bool {
         matches!(self.history.last(), Some(HistoryEntry::Resolved(_)))
     }
 
     /// Get the resolution note if this commit was resolved.
+    #[must_use]
     pub fn resolution_note(&self) -> Option<&str> {
         match self.history.last() {
             Some(HistoryEntry::Resolved(note)) => Some(note),
