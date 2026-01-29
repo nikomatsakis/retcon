@@ -4,6 +4,8 @@ use std::path::Path;
 use std::process::Command as StdCommand;
 
 use determinishtic::Determinishtic;
+use sacp::role::{HasPeer, Role};
+use sacp::Agent;
 use sacp_tokio::AcpAgent;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -26,7 +28,57 @@ pub struct ExecuteConfig {
 /// This reads the spec, finds the next pending commit, and uses the LLM
 /// to reconstruct it. Progress is saved back to the spec file after each
 /// commit attempt.
+///
+/// This variant creates its own connection to the default agent (Zed Claude Code).
+/// For use inside a proxy where you have an existing connection, use
+/// [`execute_with_connection`] instead.
 pub async fn execute(spec_path: &Path, config: &ExecuteConfig) -> Result<(), Error> {
+    // Connect to the LLM agent
+    println!("Connecting to LLM agent...");
+    let agent = AcpAgent::zed_claude_code();
+    let d = Determinishtic::new(agent)
+        .await
+        .map_err(|e| Error::AgentConnect { source: e.into() })?;
+    println!("Connected.");
+
+    execute_inner(&d, spec_path, config).await
+}
+
+/// Execute the reconstruction loop using an existing connection.
+///
+/// This variant accepts a connection to an agent, allowing it to be used
+/// inside a proxy or MCP tool where the connection is already established.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// // Inside an MCP tool handler
+/// async fn my_tool(cx: McpConnectionTo<Conductor>) -> Result<Output, Error> {
+///     let d = Determinishtic::from_connection(cx.connection_to());
+///     execute_with_connection(&d, &spec_path, &config).await?;
+///     Ok(output)
+/// }
+/// ```
+pub async fn execute_with_connection<R: Role>(
+    d: &Determinishtic<R>,
+    spec_path: &Path,
+    config: &ExecuteConfig,
+) -> Result<(), Error>
+where
+    R: HasPeer<Agent>,
+{
+    execute_inner(d, spec_path, config).await
+}
+
+/// Internal implementation shared by both execute variants.
+async fn execute_inner<R: Role>(
+    d: &Determinishtic<R>,
+    spec_path: &Path,
+    config: &ExecuteConfig,
+) -> Result<(), Error>
+where
+    R: HasPeer<Agent>,
+{
     let content = std::fs::read_to_string(spec_path).map_err(|e| Error::ReadSpec {
         path: spec_path.display().to_string(),
         source: e,
@@ -51,14 +103,6 @@ pub async fn execute(spec_path: &Path, config: &ExecuteConfig) -> Result<(), Err
 
     // Set up git state: create cleaned branch from merge-base if it doesn't exist
     setup_cleaned_branch(&git, &spec)?;
-
-    // Connect to the LLM agent
-    println!("Connecting to LLM agent...");
-    let agent = AcpAgent::zed_claude_code();
-    let d = Determinishtic::new(agent)
-        .await
-        .map_err(|e| Error::AgentConnect { source: e.into() })?;
-    println!("Connected.");
 
     // Process each pending commit
     for commit_idx in start_idx..spec.commits.len() {
@@ -85,7 +129,7 @@ pub async fn execute(spec_path: &Path, config: &ExecuteConfig) -> Result<(), Err
         }
 
         // Run the reconstruction for this commit
-        let result = reconstruct_commit(&d, &git, &spec, commit_idx, resolution_note, config).await;
+        let result = reconstruct_commit(d, &git, &spec, commit_idx, resolution_note, config).await;
 
         match result {
             Ok(entries) => {
@@ -114,21 +158,24 @@ pub async fn execute(spec_path: &Path, config: &ExecuteConfig) -> Result<(), Err
     println!("\nAll specified commits reconstructed.");
 
     // Catchall phase: ensure cleaned branch matches source exactly
-    finalize_remaining_changes(&d, &git, &spec).await?;
+    finalize_remaining_changes(d, &git, &spec).await?;
 
     println!("\nComplete! Reconstructed branch matches source.");
     Ok(())
 }
 
 /// Reconstruct a single commit, returning history entries to append.
-async fn reconstruct_commit(
-    d: &Determinishtic,
+async fn reconstruct_commit<R: Role>(
+    d: &Determinishtic<R>,
     git: &Git,
     spec: &HistorySpec,
     commit_idx: usize,
     resolution_note: Option<&str>,
     config: &ExecuteConfig,
-) -> Result<Vec<HistoryEntry>, Error> {
+) -> Result<Vec<HistoryEntry>, Error>
+where
+    R: HasPeer<Agent>,
+{
     let commit_spec = &spec.commits[commit_idx];
     let mut entries = Vec::new();
 
@@ -236,15 +283,18 @@ async fn reconstruct_commit(
 
 /// Try to fix a build/test failure using the LLM.
 /// Returns true if progress was made, false if stuck.
-async fn try_fix(
-    d: &Determinishtic,
+async fn try_fix<R: Role>(
+    d: &Determinishtic<R>,
     git: &Git,
     spec: &HistorySpec,
     commit_spec: &crate::spec::CommitSpec,
     hints: &str,
     failure: &CommandResult,
     entries: &mut Vec<HistoryEntry>,
-) -> Result<bool, Error> {
+) -> Result<bool, Error>
+where
+    R: HasPeer<Agent>,
+{
     // Get fresh diff - maybe we need to pull more from source
     let fresh_diff = git.diff(&spec.cleaned, &spec.source)?;
 
@@ -302,11 +352,14 @@ async fn try_fix(
 /// Finalize any remaining changes that weren't captured by the specified commits.
 ///
 /// This ensures the invariant: cleaned branch must match source branch exactly.
-async fn finalize_remaining_changes(
-    d: &Determinishtic,
+async fn finalize_remaining_changes<R: Role>(
+    d: &Determinishtic<R>,
     git: &Git,
     spec: &HistorySpec,
-) -> Result<(), Error> {
+) -> Result<(), Error>
+where
+    R: HasPeer<Agent>,
+{
     // Check if there's any remaining diff
     let diff = git.diff(&spec.cleaned, &spec.source)?;
     if diff.is_empty() {

@@ -15,6 +15,6 @@ mod git;
 mod prompt;
 mod spec;
 
-pub use execute::{execute, ExecuteConfig};
+pub use execute::{execute, execute_with_connection, ExecuteConfig};
 pub use prompt::prompt;
 pub use spec::{CommitSpec, HistoryEntry, HistorySpec};

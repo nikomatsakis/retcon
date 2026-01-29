@@ -12,11 +12,19 @@ readme = "README.md"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-determinishtic = "0.1.0"
+determinishtic = "0.1.1"
 sacp = "11.0.0-alpha.1"
 sacp-tokio = "11.0.0-alpha.1"
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
+tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["compat"] }
 toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[[bin]]
+name = "retcon-proxy"
+path = "src/bin/retcon-proxy.rs"
