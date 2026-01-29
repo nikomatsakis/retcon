@@ -165,14 +165,15 @@ async fn execute_tool(
     params: ExecuteParams,
     cx: McpConnectionTo<Conductor>,
 ) -> Result<ExecuteResult, sacp::Error> {
-    // 1. Write TOML to temp file
-    let temp_dir =
-        tempfile::tempdir().map_err(|e| sacp::Error::internal_error().data(e.to_string()))?;
-    let spec_path = temp_dir.path().join("spec.toml");
-    std::fs::write(&spec_path, &params.toml_spec)
+    // 1. Parse the TOML spec
+    let spec = retcon::HistorySpec::from_toml(&params.toml_spec)
+        .map_err(|e| sacp::Error::invalid_params().data(e.to_string()))?;
+
+    // 2. Find the git repository (from current directory)
+    let git = retcon::Git::discover(std::path::Path::new("."))
         .map_err(|e| sacp::Error::internal_error().data(e.to_string()))?;
 
-    // 2. Build config
+    // 3. Build config
     let config = retcon::ExecuteConfig {
         build_command: if params.skip_build.unwrap_or(false) {
             None
@@ -190,52 +191,47 @@ async fn execute_tool(
         },
     };
 
-    // 3. Create Determinishtic from the existing connection
+    // 4. Create Determinishtic from the existing connection
     let connection = cx.connection_to();
     let d = Determinishtic::from_connection(connection);
 
-    // 4. Run execute
-    let result = retcon::execute_with_connection(&d, &spec_path, &config).await;
+    // 5. Run execute with no-op hooks (the MCP tool doesn't print)
+    let result =
+        retcon::execute_with_connection(&d, spec, &git, &config, &retcon::NoOpHooks).await;
 
-    // 5. Read updated TOML
-    let updated_toml = std::fs::read_to_string(&spec_path)
+    // 6. Determine status from result
+    let (spec, error) = match result {
+        Ok(spec) => (spec, None),
+        Err((spec, e)) => (spec, Some(e)),
+    };
+
+    let updated_toml = spec
+        .to_toml()
         .map_err(|e| sacp::Error::internal_error().data(e.to_string()))?;
 
-    // 6. Parse to determine status
-    let spec = retcon::HistorySpec::from_toml(&updated_toml)
-        .map_err(|e| sacp::Error::internal_error().data(e.to_string()))?;
-
-    let status = match result {
-        Ok(()) => {
-            // Check if all commits are complete
-            if spec.commits.iter().all(|c| c.is_complete()) {
-                ExecuteStatus::Complete
-            } else {
-                // Find stuck commit
-                if let Some((idx, commit)) =
-                    spec.commits.iter().enumerate().find(|(_, c)| c.is_stuck())
-                {
-                    let reason = commit
-                        .history
-                        .last()
-                        .and_then(|h| match h {
-                            retcon::HistoryEntry::Stuck(r) => Some(r.clone()),
-                            _ => None,
-                        })
-                        .unwrap_or_else(|| "Unknown reason".to_string());
-                    ExecuteStatus::Stuck {
-                        commit_index: idx,
-                        commit_message: commit.message.clone(),
-                        reason,
-                    }
-                } else {
-                    ExecuteStatus::Complete
-                }
-            }
-        }
-        Err(e) => ExecuteStatus::Error {
+    let status = if let Some(e) = error {
+        ExecuteStatus::Error {
             message: e.to_string(),
-        },
+        }
+    } else if spec.commits.iter().all(|c| c.is_complete()) {
+        ExecuteStatus::Complete
+    } else if let Some((idx, commit)) = spec.commits.iter().enumerate().find(|(_, c)| c.is_stuck())
+    {
+        let reason = commit
+            .history
+            .last()
+            .and_then(|h| match h {
+                retcon::HistoryEntry::Stuck(r) => Some(r.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| "Unknown reason".to_string());
+        ExecuteStatus::Stuck {
+            commit_index: idx,
+            commit_message: commit.message.clone(),
+            reason,
+        }
+    } else {
+        ExecuteStatus::Complete
     };
 
     Ok(ExecuteResult {

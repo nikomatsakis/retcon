@@ -17,7 +17,6 @@ sacp = "11.0.0-alpha.1"
 sacp-tokio = "11.0.0-alpha.1"
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
-tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
