@@ -8,12 +8,15 @@
 //! This proxy also provides a `/retcon:rewrite-git-history` slash command
 //! that guides the user through creating a history specification.
 
+use std::sync::RwLock;
+
 use determinishtic::Determinishtic;
 use sacp::mcp_server::{McpConnectionTo, McpServer};
 use sacp::schema::{
-    AvailableCommand, ContentBlock, PromptRequest, SessionNotification, SessionUpdate, TextContent,
+    AvailableCommand, ContentBlock, ContentChunk, Plan, PlanEntry, PlanEntryPriority,
+    PlanEntryStatus, PromptRequest, SessionId, SessionNotification, SessionUpdate, TextContent,
 };
-use sacp::{Agent, Client, Conductor, Proxy};
+use sacp::{Agent, Client, Conductor, ConnectionTo, Proxy};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -64,6 +67,113 @@ struct ExecuteResult {
     status: ExecuteStatus,
     /// The updated TOML spec with execution history
     updated_toml: String,
+}
+
+// =============================================================================
+// ACP Hooks Implementation
+// =============================================================================
+
+/// Hooks implementation that sends progress updates over ACP.
+///
+/// Sends both text messages (via AgentMessageChunk) and plan updates
+/// (via Plan) to the client.
+struct AcpHooks {
+    connection: ConnectionTo<Conductor>,
+    session_id: SessionId,
+    /// Commit messages for building the plan. Stored on plan_init.
+    commits: RwLock<Vec<String>>,
+    /// Current status of each commit. Updated on plan_update.
+    statuses: RwLock<Vec<PlanEntryStatus>>,
+}
+
+impl AcpHooks {
+    fn new(connection: ConnectionTo<Conductor>, session_id: SessionId) -> Self {
+        Self {
+            connection,
+            session_id,
+            commits: RwLock::new(Vec::new()),
+            statuses: RwLock::new(Vec::new()),
+        }
+    }
+
+    /// Extract session ID from an acp:UUID URL.
+    fn session_id_from_acp_url(acp_url: &str) -> SessionId {
+        // Format is "acp:UUID" - strip the prefix
+        let id = acp_url.strip_prefix("acp:").unwrap_or(acp_url);
+        SessionId::new(id)
+    }
+
+    /// Send a plan update notification to the client.
+    fn send_plan(&self) {
+        let commits = self.commits.read().unwrap();
+        let statuses = self.statuses.read().unwrap();
+
+        let entries: Vec<PlanEntry> = commits
+            .iter()
+            .zip(statuses.iter())
+            .map(|(message, status)| {
+                PlanEntry::new(message.clone(), PlanEntryPriority::Medium, status.clone())
+            })
+            .collect();
+
+        let plan = Plan::new(entries);
+        let notification =
+            SessionNotification::new(self.session_id.clone(), SessionUpdate::Plan(plan));
+
+        // Ignore errors - we're in a sync context and can't do much about failures
+        let _ = self.connection.send_notification_to(Client, notification);
+    }
+
+    /// Send a text message notification to the client.
+    fn send_message(&self, text: &str) {
+        let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
+        let notification = SessionNotification::new(
+            self.session_id.clone(),
+            SessionUpdate::AgentMessageChunk(chunk),
+        );
+
+        let _ = self.connection.send_notification_to(Client, notification);
+    }
+}
+
+impl retcon::ExecuteHooks for AcpHooks {
+    fn report(&self, message: &str) {
+        self.send_message(message);
+    }
+
+    fn plan_init(&self, commits: &[&str]) {
+        {
+            let mut stored = self.commits.write().unwrap();
+            let mut statuses = self.statuses.write().unwrap();
+
+            stored.clear();
+            statuses.clear();
+
+            for commit in commits {
+                stored.push((*commit).to_string());
+                statuses.push(PlanEntryStatus::Pending);
+            }
+        }
+        self.send_plan();
+    }
+
+    fn plan_update(&self, commit_idx: usize, status: retcon::CommitStatus) {
+        {
+            let mut statuses = self.statuses.write().unwrap();
+            if commit_idx < statuses.len() {
+                // Map our CommitStatus to PlanEntryStatus
+                // Note: PlanEntryStatus doesn't have "Stuck" - we keep it as InProgress
+                // and rely on the text message to communicate the stuck state
+                statuses[commit_idx] = match status {
+                    retcon::CommitStatus::Pending => PlanEntryStatus::Pending,
+                    retcon::CommitStatus::InProgress => PlanEntryStatus::InProgress,
+                    retcon::CommitStatus::Completed => PlanEntryStatus::Completed,
+                    retcon::CommitStatus::Stuck => PlanEntryStatus::InProgress, // Best we can do
+                };
+            }
+        }
+        self.send_plan();
+    }
 }
 
 #[tokio::main]
@@ -191,13 +301,14 @@ async fn execute_tool(
         },
     };
 
-    // 4. Create Determinishtic from the existing connection
+    // 4. Create Determinishtic and AcpHooks from the connection
     let connection = cx.connection_to();
+    let session_id = AcpHooks::session_id_from_acp_url(&cx.acp_url());
+    let hooks = AcpHooks::new(connection.clone(), session_id);
     let d = Determinishtic::from_connection(connection);
 
-    // 5. Run execute with no-op hooks (the MCP tool doesn't print)
-    let result =
-        retcon::execute_with_connection(&d, spec, &git, &config, &retcon::NoOpHooks).await;
+    // 5. Run execute with ACP hooks for progress feedback
+    let result = retcon::execute_with_connection(&d, spec, &git, &config, &hooks).await;
 
     // 6. Determine status from result
     let (spec, error) = match result {

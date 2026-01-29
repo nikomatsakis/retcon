@@ -18,180 +18,55 @@ use crate::spec::{CommitSpec, HistoryEntry, HistorySpec};
 // Hooks Trait
 // =============================================================================
 
+/// Status of a commit in the execution plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitStatus {
+    /// Not yet started
+    Pending,
+    /// Currently being processed
+    InProgress,
+    /// Successfully completed
+    Completed,
+    /// Stuck and needs human intervention
+    Stuck,
+}
+
 /// Hooks for observing execution progress.
 ///
 /// Implement this trait to customize how progress is reported during execution.
 /// The default implementation [`PrintHooks`] prints to stdout.
+///
+/// The trait has two categories of methods:
+/// - `report`: Receives pre-formatted status messages
+/// - `plan_*`: Receives structured plan updates for UI rendering
 #[allow(unused_variables)]
 pub trait ExecuteHooks {
-    /// Called when resuming from a specific commit.
-    fn on_resuming(&self, commit_idx: usize, total: usize, message: &str) {}
+    /// Report a status message.
+    ///
+    /// Messages are pre-formatted and ready for display.
+    fn report(&self, message: &str) {}
 
-    /// Called when all commits are already complete.
-    fn on_all_complete(&self) {}
+    /// Initialize the plan with commit messages.
+    ///
+    /// Called once at the start of execution with all commit messages.
+    /// Implementations should store this to rebuild the plan on updates.
+    fn plan_init(&self, commits: &[&str]) {}
 
-    /// Called when the cleaned branch is checked out (existing).
-    fn on_checkout_existing(&self, branch: &str) {}
-
-    /// Called when a new cleaned branch is created from merge-base.
-    fn on_create_branch(&self, branch: &str, base_short: &str) {}
-
-    /// Called when starting work on a commit.
-    fn on_commit_start(&self, commit_idx: usize, total: usize, message: &str) {}
-
-    /// Called when a commit was previously stuck and needs human resolution.
-    fn on_commit_stuck_needs_resolution(&self) {}
-
-    /// Called when a previously stuck commit has been resolved.
-    fn on_commit_resolved(&self, note: &str) {}
-
-    /// Called when a commit is created.
-    fn on_commit_created(&self) {}
-
-    /// Called when a commit is complete.
-    fn on_commit_complete(&self) {}
-
-    /// Called when a commit gets stuck.
-    fn on_commit_stuck(&self) {}
-
-    /// Called when starting build.
-    fn on_build_start(&self) {}
-
-    /// Called when build fails.
-    fn on_build_failed(&self) {}
-
-    /// Called when build passes.
-    fn on_build_passed(&self) {}
-
-    /// Called when starting tests.
-    fn on_test_start(&self) {}
-
-    /// Called when tests fail.
-    fn on_test_failed(&self) {}
-
-    /// Called when tests pass.
-    fn on_test_passed(&self) {}
-
-    /// Called when a WIP commit is created during fix attempts.
-    fn on_wip_commit_created(&self) {}
-
-    /// Called when all specified commits are reconstructed.
-    fn on_commits_reconstructed(&self) {}
-
-    /// Called when remaining changes are detected after main reconstruction.
-    fn on_remaining_changes_detected(&self) {}
-
-    /// Called when a WIP commit is created for remaining changes.
-    fn on_remaining_wip_created(&self, message: &str) {}
-
-    /// Called when a catchall commit is created for uncategorized changes.
-    fn on_catchall_created(&self) {}
-
-    /// Called when reconstruction is fully complete.
-    fn on_complete(&self) {}
+    /// Update a commit's status in the plan.
+    ///
+    /// Called when a commit transitions between states.
+    fn plan_update(&self, commit_idx: usize, status: CommitStatus) {}
 }
 
 /// Default hooks implementation that prints to stdout.
 pub struct PrintHooks;
 
 impl ExecuteHooks for PrintHooks {
-    fn on_resuming(&self, commit_idx: usize, total: usize, message: &str) {
-        println!(
-            "Resuming from commit {}/{}: {}",
-            commit_idx + 1,
-            total,
-            message
-        );
+    fn report(&self, message: &str) {
+        println!("{}", message);
     }
 
-    fn on_all_complete(&self) {
-        println!("All commits are complete!");
-    }
-
-    fn on_checkout_existing(&self, branch: &str) {
-        println!("Checked out existing branch: {}", branch);
-    }
-
-    fn on_create_branch(&self, branch: &str, base_short: &str) {
-        println!("Created branch {} from merge-base {}", branch, base_short);
-    }
-
-    fn on_commit_start(&self, commit_idx: usize, total: usize, message: &str) {
-        println!("\nCommit {}/{}: {}", commit_idx + 1, total, message);
-    }
-
-    fn on_commit_stuck_needs_resolution(&self) {
-        println!("  ✗ Previously stuck - add a `resolved` entry to continue");
-        println!("    Edit the spec file and add after the `stuck` entry:");
-        println!("    {{ resolved = \"description of what you changed\" }}");
-    }
-
-    fn on_commit_resolved(&self, note: &str) {
-        println!("  Resolved: {note}");
-    }
-
-    fn on_commit_created(&self) {
-        println!("  Created commit");
-    }
-
-    fn on_commit_complete(&self) {
-        println!("  ✓ Commit complete");
-    }
-
-    fn on_commit_stuck(&self) {
-        println!("  ✗ Stuck - stopping");
-    }
-
-    fn on_build_start(&self) {
-        println!("  Building...");
-    }
-
-    fn on_build_failed(&self) {
-        println!("  Build failed, consulting LLM...");
-    }
-
-    fn on_build_passed(&self) {
-        println!("  Build passed");
-    }
-
-    fn on_test_start(&self) {
-        println!("  Testing...");
-    }
-
-    fn on_test_failed(&self) {
-        println!("  Tests failed, consulting LLM...");
-    }
-
-    fn on_test_passed(&self) {
-        println!("  Tests passed");
-    }
-
-    fn on_wip_commit_created(&self) {
-        println!("  Created WIP commit");
-    }
-
-    fn on_commits_reconstructed(&self) {
-        println!("\nAll specified commits reconstructed.");
-    }
-
-    fn on_remaining_changes_detected(&self) {
-        println!("\nRemaining changes detected - creating WIP commits...");
-    }
-
-    fn on_remaining_wip_created(&self, message: &str) {
-        println!("  Created: {message}");
-    }
-
-    fn on_catchall_created(&self) {
-        println!("  Created: WIP--remaining changes (review manually)");
-        println!("\n⚠ Warning: Some changes could not be automatically categorized.");
-        println!("  Please review the 'WIP--remaining changes' commit and distribute");
-        println!("  its contents to the appropriate commits during interactive rebase.");
-    }
-
-    fn on_complete(&self) {
-        println!("\nComplete! Reconstructed branch matches source.");
-    }
+    // PrintHooks ignores plan_init/plan_update - the messages contain all needed info
 }
 
 /// No-op hooks implementation for silent execution.
@@ -304,13 +179,24 @@ where
     R: Role + HasPeer<Agent>,
     H: ExecuteHooks,
 {
+    let total = spec.commits.len();
+
+    // Initialize the plan with all commit messages
+    let commit_messages: Vec<&str> = spec.commits.iter().map(|c| c.message.as_str()).collect();
+    hooks.plan_init(&commit_messages);
+
     // Find where to resume
     let Some(start_idx) = spec.next_pending_commit() else {
-        hooks.on_all_complete();
+        hooks.report("All commits are complete!");
         return Ok(spec);
     };
 
-    hooks.on_resuming(start_idx, spec.commits.len(), &spec.commits[start_idx].message);
+    hooks.report(&format!(
+        "Resuming from commit {}/{}: {}",
+        start_idx + 1,
+        total,
+        &spec.commits[start_idx].message
+    ));
 
     // Set up git state: create cleaned branch from merge-base if it doesn't exist
     setup_cleaned_branch(git, &spec, hooks).map_err(|e| (spec.clone(), e))?;
@@ -321,21 +207,31 @@ where
 
         // Skip completed commits
         if commit_spec.is_complete() {
+            hooks.plan_update(commit_idx, CommitStatus::Completed);
             continue;
         }
 
-        hooks.on_commit_start(commit_idx, spec.commits.len(), &commit_spec.message);
+        hooks.plan_update(commit_idx, CommitStatus::InProgress);
+        hooks.report(&format!(
+            "\nCommit {}/{}: {}",
+            commit_idx + 1,
+            total,
+            &commit_spec.message
+        ));
 
         // Check if stuck from previous run - require human resolution
         if commit_spec.is_stuck() {
-            hooks.on_commit_stuck_needs_resolution();
+            hooks.plan_update(commit_idx, CommitStatus::Stuck);
+            hooks.report("  ✗ Previously stuck - add a `resolved` entry to continue");
+            hooks.report("    Edit the spec file and add after the `stuck` entry:");
+            hooks.report("    { resolved = \"description of what you changed\" }");
             return Ok(spec);
         }
 
         // If resolved, include the resolution note in context
         let resolution_note = commit_spec.resolution_note();
         if let Some(note) = resolution_note {
-            hooks.on_commit_resolved(note);
+            hooks.report(&format!("  Resolved: {note}"));
         }
 
         // Run the reconstruction for this commit
@@ -348,9 +244,11 @@ where
                 spec.commits[commit_idx].history.extend(entries);
 
                 if spec.commits[commit_idx].is_complete() {
-                    hooks.on_commit_complete();
+                    hooks.plan_update(commit_idx, CommitStatus::Completed);
+                    hooks.report("  ✓ Commit complete");
                 } else if spec.commits[commit_idx].is_stuck() {
-                    hooks.on_commit_stuck();
+                    hooks.plan_update(commit_idx, CommitStatus::Stuck);
+                    hooks.report("  ✗ Stuck - stopping");
                     return Ok(spec);
                 }
             }
@@ -359,19 +257,20 @@ where
                 spec.commits[commit_idx]
                     .history
                     .push(HistoryEntry::Stuck(e.to_string()));
+                hooks.plan_update(commit_idx, CommitStatus::Stuck);
                 return Err((spec, e));
             }
         }
     }
 
-    hooks.on_commits_reconstructed();
+    hooks.report("\nAll specified commits reconstructed.");
 
     // Catchall phase: ensure cleaned branch matches source exactly
     finalize_remaining_changes(d, git, &spec, hooks)
         .await
         .map_err(|e| (spec.clone(), e))?;
 
-    hooks.on_complete();
+    hooks.report("\nComplete! Reconstructed branch matches source.");
     Ok(spec)
 }
 
@@ -452,17 +351,17 @@ where
     // Create the commit
     let hash = git.commit(&commit_spec.message)?;
     entries.push(HistoryEntry::CommitCreated(hash));
-    hooks.on_commit_created();
+    hooks.report("  Created commit");
 
     // Enter the verify/fix loop
     loop {
         // Run build if configured
         if let Some(build_cmd) = &config.build_command {
-            hooks.on_build_start();
+            hooks.report("  Building...");
             let build_result = run_command(git.root(), build_cmd)?;
 
             if !build_result.success {
-                hooks.on_build_failed();
+                hooks.report("  Build failed, consulting LLM...");
                 if !try_fix(d, git, spec, commit_spec, hints, &build_result, &mut entries, hooks)
                     .await?
                 {
@@ -471,16 +370,16 @@ where
                 // LLM made fixes, loop continues to re-verify
                 continue;
             }
-            hooks.on_build_passed();
+            hooks.report("  Build passed");
         }
 
         // Run tests if configured
         if let Some(test_cmd) = &config.test_command {
-            hooks.on_test_start();
+            hooks.report("  Testing...");
             let test_result = run_command(git.root(), test_cmd)?;
 
             if !test_result.success {
-                hooks.on_test_failed();
+                hooks.report("  Tests failed, consulting LLM...");
                 if !try_fix(d, git, spec, commit_spec, hints, &test_result, &mut entries, hooks)
                     .await?
                 {
@@ -489,7 +388,7 @@ where
                 // LLM made fixes, loop continues to re-verify
                 continue;
             }
-            hooks.on_test_passed();
+            hooks.report("  Tests passed");
         }
 
         // Both build and test passed (or were skipped)
@@ -563,7 +462,7 @@ where
     let wip_message = format!("WIP: fix for {}", commit_spec.message);
     let hash = git.commit(&wip_message)?;
     entries.push(HistoryEntry::CommitCreated(hash));
-    hooks.on_wip_commit_created();
+    hooks.report("  Created WIP commit");
 
     Ok(true)
 }
@@ -587,7 +486,7 @@ where
         return Ok(());
     }
 
-    hooks.on_remaining_changes_detected();
+    hooks.report("\nRemaining changes detected - creating WIP commits...");
 
     // Build a summary of commits that were created
     let commit_summary: String = spec
@@ -697,7 +596,10 @@ where
     git.checkout_files(&source, ".")?;
     let _hash = git.commit("WIP--remaining changes (review manually)")?;
 
-    hooks.on_catchall_created();
+    hooks.report("  Created: WIP--remaining changes (review manually)");
+    hooks.report("\n⚠ Warning: Some changes could not be automatically categorized.");
+    hooks.report("  Please review the 'WIP--remaining changes' commit and distribute");
+    hooks.report("  its contents to the appropriate commits during interactive rebase.");
 
     Ok(())
 }
@@ -758,11 +660,15 @@ fn setup_cleaned_branch<H: ExecuteHooks>(
 ) -> Result<(), Error> {
     if git.ref_exists(&spec.cleaned) {
         git.checkout(&spec.cleaned)?;
-        hooks.on_checkout_existing(&spec.cleaned);
+        hooks.report(&format!("Checked out existing branch: {}", spec.cleaned));
     } else {
         let base = git.merge_base(&spec.source, &spec.remote)?;
         git.checkout_new_branch(&spec.cleaned, &base)?;
-        hooks.on_create_branch(&spec.cleaned, &base[..8.min(base.len())]);
+        let base_short = &base[..8.min(base.len())];
+        hooks.report(&format!(
+            "Created branch {} from merge-base {}",
+            spec.cleaned, base_short
+        ));
     }
     Ok(())
 }
