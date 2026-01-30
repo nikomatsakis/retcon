@@ -24,6 +24,9 @@ toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 
+[package.metadata.symposium]
+binary = "retcon-proxy"
+
 [[bin]]
 name = "retcon-proxy"
 path = "src/bin/retcon-proxy.rs"
