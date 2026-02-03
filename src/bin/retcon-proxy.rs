@@ -8,15 +8,17 @@
 //! This proxy also provides a `/retcon:rewrite-git-history` slash command
 //! that guides the user through creating a history specification.
 
+use std::path::PathBuf;
 use std::sync::RwLock;
 
 use determinishtic::Determinishtic;
 use sacp::mcp_server::{McpConnectionTo, McpServer};
 use sacp::schema::{
-    AvailableCommand, ContentBlock, ContentChunk, Plan, PlanEntry, PlanEntryPriority,
-    PlanEntryStatus, PromptRequest, SessionId, SessionNotification, SessionUpdate, TextContent,
+    AvailableCommand, ContentBlock, ContentChunk, NewSessionRequest, Plan, PlanEntry,
+    PlanEntryPriority, PlanEntryStatus, PromptRequest, SessionId, SessionNotification,
+    SessionUpdate, TextContent,
 };
-use sacp::{Agent, Client, Conductor, ConnectionTo, Proxy};
+use sacp::{Agent, Client, Conductor, ConnectionTo, Proxy, RunWithConnectionTo};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -184,27 +186,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("retcon-proxy starting");
 
-    let mcp_server = McpServer::builder("retcon")
-        .instructions(
-            "Git history rewriting tools. Use execute-git-rewrite to run a rewrite \
-             from a TOML specification. The tool will use the agent to extract and \
-             apply changes, creating clean commits.",
-        )
-        .tool_fn(
-            "execute-git-rewrite",
-            "Execute a git history rewrite from a TOML specification. \
-             Returns the updated spec with execution history and a status \
-             indicating completion or where it got stuck.",
-            async |params: ExecuteParams, cx: McpConnectionTo<Conductor>| {
-                execute_tool(params, cx).await
-            },
-            sacp::tool_fn!(),
-        )
-        .build();
-
     Proxy
         .builder()
-        .with_mcp_server(mcp_server)
+        .on_receive_request_from(
+            Client,
+            async |req: NewSessionRequest, responder, connection| {
+                let cwd = req.cwd.clone();
+                connection
+                    .build_session_from(req)
+                    .with_mcp_server(make_mcp_server(cwd))?
+                    .on_proxy_session_start(responder, async |_session_id| Ok(()))?;
+                Ok(())
+            },
+            sacp::on_receive_request!(),
+        )
         // Intercept PromptRequest from client to detect slash command
         .on_receive_request_from(
             Client,
@@ -245,6 +240,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn make_mcp_server(cwd: PathBuf) -> McpServer<Conductor, impl RunWithConnectionTo<Conductor>> {
+    McpServer::builder("retcon")
+        .instructions(
+            "Git history rewriting tools. Use execute-git-rewrite to run a rewrite \
+             from a TOML specification. The tool will use the agent to extract and \
+             apply changes, creating clean commits.",
+        )
+        .tool_fn(
+            "execute-git-rewrite",
+            "Execute a git history rewrite from a TOML specification. \
+             Returns the updated spec with execution history and a status \
+             indicating completion or where it got stuck.",
+            async move |params: ExecuteParams, cx: McpConnectionTo<Conductor>| {
+                execute_tool(params, &cwd, cx).await
+            },
+            sacp::tool_fn!(),
+        )
+        .build()
+}
+
 /// Check if the prompt request is the rewrite-git-history command.
 fn is_rewrite_command(request: &PromptRequest) -> bool {
     // Extract text from the prompt
@@ -273,14 +288,15 @@ fn replace_with_canned_prompt(mut request: PromptRequest) -> PromptRequest {
 
 async fn execute_tool(
     params: ExecuteParams,
+    cwd: &PathBuf,
     cx: McpConnectionTo<Conductor>,
 ) -> Result<ExecuteResult, sacp::Error> {
     // 1. Parse the TOML spec
     let spec = retcon::HistorySpec::from_toml(&params.toml_spec)
         .map_err(|e| sacp::Error::invalid_params().data(e.to_string()))?;
 
-    // 2. Find the git repository (from current directory)
-    let git = retcon::Git::discover(std::path::Path::new("."))
+    // 2. Find the git repository from the session's working directory
+    let git = retcon::Git::discover(cwd)
         .map_err(|e| sacp::Error::internal_error().data(e.to_string()))?;
 
     // 3. Build config

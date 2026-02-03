@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "mcp__ferris__crate_sources",
-      "mcp__cargo-mcp__cargo_check"
+      "mcp__cargo-mcp__cargo_check",
+      "mcp__cargo-mcp__cargo_build"
     ]
   }
 }
