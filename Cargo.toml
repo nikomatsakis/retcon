@@ -12,7 +12,7 @@ readme = "README.md"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-determinishtic = "0.1.1"
+determinishtic = "0.2.0"
 sacp = "11.0.0-alpha.1"
 sacp-tokio = "11.0.0-alpha.1"
 schemars = "1"
