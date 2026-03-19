@@ -14,8 +14,12 @@ mod execute;
 mod git;
 mod prompt;
 mod spec;
+pub mod tui;
 
-pub use execute::{execute, execute_with_connection, CommitStatus, ExecuteConfig, ExecuteHooks, NoOpHooks, PrintHooks};
+pub use execute::{
+    CommitStatus, ExecuteConfig, ExecuteHooks, NoOpHooks, PrintHooks, execute,
+    execute_with_connection, execute_with_hooks,
+};
 pub use git::Git;
 pub use prompt::prompt;
 pub use spec::{CommitSpec, HistoryEntry, HistorySpec};

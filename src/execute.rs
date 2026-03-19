@@ -4,8 +4,8 @@ use std::path::Path;
 use std::process::Command as StdCommand;
 
 use determinishtic::Determinishtic;
-use sacp::role::{HasPeer, Role};
 use sacp::Agent;
+use sacp::role::{HasPeer, Role};
 use sacp_tokio::AcpAgent;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -93,6 +93,19 @@ pub struct ExecuteConfig {
 /// For use inside a proxy where you have an existing connection, use
 /// [`execute_with_connection`] instead.
 pub async fn execute(spec_path: &Path, config: &ExecuteConfig) -> Result<(), Error> {
+    execute_with_hooks(spec_path, config, &PrintHooks, None).await
+}
+
+/// Execute the reconstruction loop with custom hooks and an optional observer.
+///
+/// The observer, if provided, is attached to the `Determinishtic` instance
+/// so it receives live session updates from the LLM agent.
+pub async fn execute_with_hooks(
+    spec_path: &Path,
+    config: &ExecuteConfig,
+    hooks: &(impl ExecuteHooks + Sync),
+    observer: Option<std::sync::Arc<dyn determinishtic::ThinkObserver>>,
+) -> Result<(), Error> {
     // Read the spec
     let content = std::fs::read_to_string(spec_path).map_err(|e| Error::ReadSpec {
         path: spec_path.display().to_string(),
@@ -101,18 +114,23 @@ pub async fn execute(spec_path: &Path, config: &ExecuteConfig) -> Result<(), Err
     let spec = HistorySpec::from_toml(&content)?;
 
     // Connect to the LLM agent
-    println!("Connecting to LLM agent...");
+    hooks.report("Connecting to LLM agent...");
     let agent = AcpAgent::zed_claude_code();
-    let d = Determinishtic::new(agent)
+    let mut d = Determinishtic::new(agent)
         .await
         .map_err(|e| Error::AgentConnect { source: e.into() })?;
-    println!("Connected.");
+    hooks.report("Connected.");
+
+    // Attach observer if provided
+    if let Some(obs) = observer {
+        d.set_observer(obs);
+    }
 
     // Find the git repository root
     let git = Git::discover(spec_path)?;
 
-    // Execute with print hooks
-    let result_spec = execute_inner(&d, spec, &git, config, &PrintHooks).await;
+    // Execute with the provided hooks
+    let result_spec = execute_inner(&d, spec, &git, config, hooks).await;
 
     // Always save the spec, even on error
     match &result_spec {
@@ -180,26 +198,36 @@ where
     H: ExecuteHooks,
 {
     let total = spec.commits.len();
+    let verify_idx = total; // index of the "verify" entry in the plan
 
-    // Initialize the plan with all commit messages
-    let commit_messages: Vec<&str> = spec.commits.iter().map(|c| c.message.as_str()).collect();
-    hooks.plan_init(&commit_messages);
+    // Initialize the plan: all commits + a final "verify" step
+    let mut plan_messages: Vec<&str> = spec.commits.iter().map(|c| c.message.as_str()).collect();
+    plan_messages.push("Verify branch matches source");
+    hooks.plan_init(&plan_messages);
 
-    // Find where to resume
-    let Some(start_idx) = spec.next_pending_commit() else {
-        hooks.report("All commits are complete!");
-        return Ok(spec);
-    };
-
-    hooks.report(&format!(
-        "Resuming from commit {}/{}: {}",
-        start_idx + 1,
-        total,
-        &spec.commits[start_idx].message
-    ));
+    // Mark already-completed/stuck commits so the UI shows their status immediately
+    for (i, commit) in spec.commits.iter().enumerate() {
+        if commit.is_complete() {
+            hooks.plan_update(i, CommitStatus::Completed);
+        } else if commit.is_stuck() {
+            hooks.plan_update(i, CommitStatus::Stuck);
+        }
+    }
 
     // Set up git state: create cleaned branch from merge-base if it doesn't exist
     setup_cleaned_branch(git, &spec, hooks).map_err(|e| (spec.clone(), e))?;
+
+    // Find where to resume (may be None if all commits are already done)
+    if let Some(start_idx) = spec.next_pending_commit() {
+        hooks.report(&format!(
+            "Resuming from commit {}/{}: {}",
+            start_idx + 1,
+            total,
+            &spec.commits[start_idx].message
+        ));
+    } else {
+        hooks.report("All commits complete, verifying final state...");
+    }
 
     // Process each commit
     for commit_idx in 0..spec.commits.len() {
@@ -266,10 +294,15 @@ where
     hooks.report("\nAll specified commits reconstructed.");
 
     // Catchall phase: ensure cleaned branch matches source exactly
+    hooks.plan_update(verify_idx, CommitStatus::InProgress);
     finalize_remaining_changes(d, git, &spec, hooks)
         .await
-        .map_err(|e| (spec.clone(), e))?;
+        .map_err(|e| {
+            hooks.plan_update(verify_idx, CommitStatus::Stuck);
+            (spec.clone(), e)
+        })?;
 
+    hooks.plan_update(verify_idx, CommitStatus::Completed);
     hooks.report("\nComplete! Reconstructed branch matches source.");
     Ok(spec)
 }
@@ -362,8 +395,17 @@ where
 
             if !build_result.success {
                 hooks.report("  Build failed, consulting LLM...");
-                if !try_fix(d, git, spec, commit_spec, hints, &build_result, &mut entries, hooks)
-                    .await?
+                if !try_fix(
+                    d,
+                    git,
+                    spec,
+                    commit_spec,
+                    hints,
+                    &build_result,
+                    &mut entries,
+                    hooks,
+                )
+                .await?
                 {
                     return Ok(entries);
                 }
@@ -380,8 +422,17 @@ where
 
             if !test_result.success {
                 hooks.report("  Tests failed, consulting LLM...");
-                if !try_fix(d, git, spec, commit_spec, hints, &test_result, &mut entries, hooks)
-                    .await?
+                if !try_fix(
+                    d,
+                    git,
+                    spec,
+                    commit_spec,
+                    hints,
+                    &test_result,
+                    &mut entries,
+                    hooks,
+                )
+                .await?
                 {
                     return Ok(entries);
                 }
