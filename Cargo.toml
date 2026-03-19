@@ -32,6 +32,3 @@ binary = "retcon-proxy"
 [[bin]]
 name = "retcon-proxy"
 path = "src/bin/retcon-proxy.rs"
-
-[patch.crates-io]
-determinishtic = { path = "../determinishtic" }

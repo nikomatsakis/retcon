@@ -461,6 +461,8 @@ dependencies = [
 [[package]]
 name = "determinishtic"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "590459faf62fdb4ae188f902adc65e5b5a3191cc99b43d56b0f9b7e34cd9d507"
 dependencies = [
  "futures",
  "sacp",
