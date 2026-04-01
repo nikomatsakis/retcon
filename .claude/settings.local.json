@@ -3,7 +3,10 @@
     "allow": [
       "mcp__ferris__crate_sources",
       "mcp__cargo-mcp__cargo_check",
-      "mcp__cargo-mcp__cargo_build"
+      "mcp__cargo-mcp__cargo_build",
+      "mcp__acp__Write",
+      "mcp__acp__Edit",
+      "mcp__acp__Bash"
     ]
   }
 }

@@ -1,16 +1,15 @@
-//! Two-pane TUI for retcon execute.
+//! Scrollback-based terminal output for retcon execute.
 //!
-//! Top pane: live agent activity (text, tool calls, permissions).
-//! Bottom pane: commit plan progress.
+//! Prints agent activity and status messages to stdout with ANSI colors.
+//! A single status line at the bottom shows the current commit progress,
+//! redrawn in place using carriage return.
 
-use std::io;
+use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 
 use crossterm::ExecutableCommand;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
-use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+use crossterm::style::{Attribute, Color, ResetColor, SetAttribute, SetForegroundColor};
+use crossterm::terminal::{Clear, ClearType};
 use sacp::schema::{ContentBlock, SessionNotification, SessionUpdate};
 
 use crate::execute::{CommitStatus, ExecuteHooks};
@@ -19,66 +18,166 @@ use crate::execute::{CommitStatus, ExecuteHooks};
 // Shared State
 // =============================================================================
 
-/// Shared state between the async observer/hooks and the sync TUI render loop.
-#[derive(Debug, Default)]
-struct TuiState {
-    /// Lines of agent activity for the snooping pane.
-    agent_lines: Vec<AgentLine>,
-
+/// Shared state for coordinating stdout writes with the status line.
+struct StatusState {
     /// Commit plan entries.
     plan: Vec<PlanEntry>,
-    /// Whether execution has finished.
-    done: bool,
-    /// Final error message, if any.
-    error: Option<String>,
+    /// Whether the status line is currently drawn (needs clearing before normal output).
+    status_drawn: bool,
 }
 
-#[derive(Debug, Clone)]
-struct AgentLine {
-    kind: LineKind,
-    text: String,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum LineKind {
-    Text,
-    Tool,
-    Permission,
-    Status,
-}
-
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct PlanEntry {
     message: String,
     status: CommitStatus,
 }
 
-// =============================================================================
-// TuiObserver — implements ThinkObserver
-// =============================================================================
+impl StatusState {
+    fn new() -> Self {
+        Self {
+            plan: Vec::new(),
+            status_drawn: false,
+        }
+    }
 
-/// Observer that extracts displayable content from session messages.
-pub struct TuiObserver {
-    state: Arc<Mutex<TuiState>>,
+    /// Clear the status line if it's drawn, so normal output can print cleanly.
+    fn clear_status_line(&mut self) {
+        if self.status_drawn {
+            let mut stdout = io::stdout();
+            let _ = stdout.execute(crossterm::cursor::MoveToColumn(0));
+            let _ = stdout.execute(Clear(ClearType::CurrentLine));
+            self.status_drawn = false;
+        }
+    }
+
+    /// Draw/redraw the status line based on current plan state.
+    fn draw_status_line(&mut self) {
+        if self.plan.is_empty() {
+            return;
+        }
+
+        let total = self.plan.len();
+        let mut stdout = io::stdout();
+
+        // Find the current item to display
+        let (label, style) = if let Some((idx, entry)) = self
+            .plan
+            .iter()
+            .enumerate()
+            .find(|(_, e)| e.status == CommitStatus::InProgress)
+        {
+            (
+                format!("[{}/{}] {}", idx + 1, total, entry.message),
+                (Color::Yellow, true),
+            )
+        } else if let Some((idx, entry)) = self
+            .plan
+            .iter()
+            .enumerate()
+            .find(|(_, e)| e.status == CommitStatus::Stuck)
+        {
+            (
+                format!("[{}/{}] STUCK: {}", idx + 1, total, entry.message),
+                (Color::Red, true),
+            )
+        } else if self
+            .plan
+            .iter()
+            .all(|e| e.status == CommitStatus::Completed)
+        {
+            (
+                format!("[{}/{}] All commits complete", total, total),
+                (Color::Green, false),
+            )
+        } else {
+            // Find first pending
+            let idx = self
+                .plan
+                .iter()
+                .position(|e| e.status == CommitStatus::Pending)
+                .unwrap_or(0);
+            (
+                format!("[{}/{}] {}", idx + 1, total, self.plan[idx].message),
+                (Color::White, false),
+            )
+        };
+
+        let _ = stdout.execute(crossterm::cursor::MoveToColumn(0));
+        let _ = stdout.execute(Clear(ClearType::CurrentLine));
+        let _ = stdout.execute(SetForegroundColor(style.0));
+        if style.1 {
+            let _ = stdout.execute(SetAttribute(Attribute::Bold));
+        }
+        let _ = write!(stdout, "{label}");
+        if style.1 {
+            let _ = stdout.execute(SetAttribute(Attribute::Reset));
+        }
+        let _ = stdout.execute(ResetColor);
+        let _ = stdout.flush();
+
+        self.status_drawn = true;
+    }
+
+    /// Print a line to stdout, managing the status line.
+    fn println(&mut self, line: &str) {
+        self.clear_status_line();
+        println!("{line}");
+        self.draw_status_line();
+    }
+
+    /// Print styled text to stdout, managing the status line.
+    fn println_styled(&mut self, line: &str, color: Color, bold: bool) {
+        self.clear_status_line();
+        let mut stdout = io::stdout();
+        let _ = stdout.execute(SetForegroundColor(color));
+        if bold {
+            let _ = stdout.execute(SetAttribute(Attribute::Bold));
+        }
+        println!("{line}");
+        if bold {
+            let _ = stdout.execute(SetAttribute(Attribute::Reset));
+        }
+        let _ = stdout.execute(ResetColor);
+        self.draw_status_line();
+    }
+
+    /// Print agent text chunk — appends inline without a newline unless the chunk contains one.
+    fn print_text_chunk(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+
+        // If the text ends with a newline, the cursor will be on a fresh line,
+        // so we can redraw the status. If it doesn't, leave the status cleared
+        // since we're mid-line.
+        self.clear_status_line();
+        let mut stdout = io::stdout();
+        let _ = write!(stdout, "{text}");
+        let _ = stdout.flush();
+
+        if text.ends_with('\n') {
+            self.draw_status_line();
+        }
+    }
 }
 
-impl determinishtic::ThinkObserver for TuiObserver {
+// =============================================================================
+// TerminalObserver — implements ThinkObserver
+// =============================================================================
+
+/// Observer that prints agent activity to stdout with ANSI colors.
+pub struct TerminalObserver {
+    state: Arc<Mutex<StatusState>>,
+}
+
+impl determinishtic::ThinkObserver for TerminalObserver {
     fn on_prompt(&self, prompt: &str) {
         let mut state = self.state.lock().unwrap();
-        state.agent_lines.push(AgentLine {
-            kind: LineKind::Status,
-            text: "--- Prompt ---".to_string(),
-        });
+        state.println_styled("--- Prompt ---", Color::DarkGrey, false);
         for line in prompt.lines() {
-            state.agent_lines.push(AgentLine {
-                kind: LineKind::Status,
-                text: line.to_string(),
-            });
+            state.println_styled(line, Color::DarkGrey, false);
         }
-        state.agent_lines.push(AgentLine {
-            kind: LineKind::Status,
-            text: "--- End Prompt ---".to_string(),
-        });
+        state.println_styled("--- End Prompt ---", Color::DarkGrey, false);
     }
 
     fn on_notification(&self, notification: &SessionNotification) {
@@ -86,46 +185,15 @@ impl determinishtic::ThinkObserver for TuiObserver {
         match &notification.update {
             SessionUpdate::AgentMessageChunk(chunk) => {
                 if let ContentBlock::Text(text) = &chunk.content {
-                    // Agent text arrives in small token-sized chunks.
-                    // Append to the last Text line; start a new line on \n.
-                    for (i, segment) in text.text.split('\n').enumerate() {
-                        if i > 0 {
-                            // Newline boundary — start a new text line
-                            state.agent_lines.push(AgentLine {
-                                kind: LineKind::Text,
-                                text: String::new(),
-                            });
-                        }
-                        if !segment.is_empty() {
-                            // Append to the current text line, or start one
-                            if let Some(last) = state
-                                .agent_lines
-                                .last_mut()
-                                .filter(|l| matches!(l.kind, LineKind::Text))
-                            {
-                                last.text.push_str(segment);
-                            } else {
-                                state.agent_lines.push(AgentLine {
-                                    kind: LineKind::Text,
-                                    text: segment.to_string(),
-                                });
-                            }
-                        }
-                    }
+                    state.print_text_chunk(&text.text);
                 }
             }
             SessionUpdate::ToolCall(tool_call) => {
-                state.agent_lines.push(AgentLine {
-                    kind: LineKind::Tool,
-                    text: format!("[tool] {}", tool_call.title),
-                });
+                state.println_styled(&format!("[tool] {}", tool_call.title), Color::Cyan, false);
             }
             SessionUpdate::ToolCallUpdate(update) => {
                 if let Some(title) = &update.fields.title {
-                    state.agent_lines.push(AgentLine {
-                        kind: LineKind::Tool,
-                        text: format!("[tool update] {title}"),
-                    });
+                    state.println_styled(&format!("[tool update] {title}"), Color::Cyan, false);
                 }
             }
             _ => {}
@@ -140,37 +208,28 @@ impl determinishtic::ThinkObserver for TuiObserver {
             .title
             .as_deref()
             .unwrap_or("unknown tool");
-        state.agent_lines.push(AgentLine {
-            kind: LineKind::Permission,
-            text: format!("[permission] {title}"),
-        });
+        state.println_styled(&format!("[permission] {title}"), Color::Yellow, false);
     }
 
     fn on_stop(&self, reason: &sacp::schema::StopReason) {
         let mut state = self.state.lock().unwrap();
-        state.agent_lines.push(AgentLine {
-            kind: LineKind::Status,
-            text: format!("Session stopped: {reason:?}"),
-        });
+        state.println_styled(&format!("Session stopped: {reason:?}"), Color::Green, false);
     }
 }
 
 // =============================================================================
-// TuiHooks — implements ExecuteHooks
+// TerminalHooks — implements ExecuteHooks
 // =============================================================================
 
-/// Hooks that feed structured plan events into the TUI state.
-pub struct TuiHooks {
-    state: Arc<Mutex<TuiState>>,
+/// Hooks that print status messages and manage the status line.
+pub struct TerminalHooks {
+    state: Arc<Mutex<StatusState>>,
 }
 
-impl ExecuteHooks for TuiHooks {
+impl ExecuteHooks for TerminalHooks {
     fn report(&self, message: &str) {
         let mut state = self.state.lock().unwrap();
-        state.agent_lines.push(AgentLine {
-            kind: LineKind::Status,
-            text: message.to_string(),
-        });
+        state.println(message);
     }
 
     fn plan_init(&self, commits: &[&str]) {
@@ -182,6 +241,7 @@ impl ExecuteHooks for TuiHooks {
                 status: CommitStatus::Pending,
             })
             .collect();
+        state.draw_status_line();
     }
 
     fn plan_update(&self, commit_idx: usize, status: CommitStatus) {
@@ -189,232 +249,24 @@ impl ExecuteHooks for TuiHooks {
         if let Some(entry) = state.plan.get_mut(commit_idx) {
             entry.status = status;
         }
+        state.clear_status_line();
+        state.draw_status_line();
     }
 }
 
 // =============================================================================
-// TuiApp — the ratatui event loop
+// Constructor
 // =============================================================================
 
-/// The TUI application. Owns the terminal and runs the render/input loop.
-pub struct TuiApp {
-    state: Arc<Mutex<TuiState>>,
-}
-
-impl TuiApp {
-    /// Create a new TUI app and return it along with the observer and hooks.
-    pub fn new() -> (Self, TuiObserver, TuiHooks) {
-        let state = Arc::new(Mutex::new(TuiState::default()));
-        let app = Self {
-            state: state.clone(),
-        };
-        let observer = TuiObserver {
-            state: state.clone(),
-        };
-        let hooks = TuiHooks {
-            state: state.clone(),
-        };
-        (app, observer, hooks)
-    }
-
-    /// Signal that execution is done (success or failure).
-    pub fn signal_done(&self, result: Result<(), String>) {
-        let mut state = self.state.lock().unwrap();
-        state.done = true;
-        if let Err(e) = result {
-            state.error = Some(e);
-        }
-    }
-
-    /// Run the TUI event loop. Blocks the current thread.
-    ///
-    /// Returns when the user presses 'q' or execution finishes.
-    pub fn run(&self) -> io::Result<()> {
-        // Set up panic hook to restore terminal on panic
-        let original_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            let _ = terminal::disable_raw_mode();
-            let _ = io::stdout().execute(LeaveAlternateScreen);
-            original_hook(info);
-        }));
-
-        // Set up terminal
-        terminal::enable_raw_mode()?;
-        io::stdout().execute(EnterAlternateScreen)?;
-        let backend = CrosstermBackend::new(io::stdout());
-        let mut terminal = Terminal::new(backend)?;
-
-        let result = self.event_loop(&mut terminal);
-
-        // Restore terminal
-        terminal::disable_raw_mode()?;
-        io::stdout().execute(LeaveAlternateScreen)?;
-
-        result
-    }
-
-    fn event_loop(&self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
-        loop {
-            // Draw
-            terminal.draw(|frame| self.draw(frame))?;
-
-            // Poll for input with a short timeout so we keep redrawing
-            if event::poll(std::time::Duration::from_millis(50))? {
-                if let Event::Key(key) = event::read()? {
-                    if self.handle_key(key) {
-                        return Ok(());
-                    }
-                }
-            }
-
-            // Check if done and user should see final state
-            let state = self.state.lock().unwrap();
-            if state.done {
-                drop(state);
-                // Draw one more time to show final state, then wait for 'q'
-                terminal.draw(|frame| self.draw(frame))?;
-                loop {
-                    if let Event::Key(key) = event::read()? {
-                        if matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q'))
-                            || (key.code == KeyCode::Char('c')
-                                && key.modifiers.contains(KeyModifiers::CONTROL))
-                        {
-                            return Ok(());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn handle_key(&self, key: KeyEvent) -> bool {
-        matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q'))
-            || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
-    }
-
-    fn draw(&self, frame: &mut Frame) {
-        let state = self.state.lock().unwrap();
-        let area = frame.area();
-
-        // Vertical split: agent 2/3 top, progress 1/3 bottom
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(67), Constraint::Percentage(33)])
-            .split(area);
-
-        // Agent pane
-        self.draw_agent_pane(frame, chunks[0], &state);
-
-        // Progress pane
-        self.draw_progress_pane(frame, chunks[1], &state);
-    }
-
-    fn draw_agent_pane(&self, frame: &mut Frame, area: Rect, state: &TuiState) {
-        let title = if state.done {
-            if let Some(ref err) = state.error {
-                format!(" Agent (DONE - error: {err}) ")
-            } else {
-                " Agent (DONE) ".to_string()
-            }
-        } else {
-            " Agent ".to_string()
-        };
-
-        let block = Block::default().title(title).borders(Borders::ALL);
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-
-        // Show the tail of agent lines, auto-scrolling to bottom.
-        let lines: Vec<Line> = state
-            .agent_lines
-            .iter()
-            .map(|line| {
-                let style = match line.kind {
-                    LineKind::Text => Style::default(),
-                    LineKind::Tool => Style::default().fg(Color::Cyan),
-                    LineKind::Permission => Style::default().fg(Color::Yellow),
-                    LineKind::Status => Style::default().fg(Color::Green).bold(),
-                };
-                Line::styled(&line.text, style)
-            })
-            .collect();
-
-        // Compute wrapped line count to auto-scroll to the bottom.
-        let width = inner.width as usize;
-        let wrapped_height: usize = if width == 0 {
-            lines.len()
-        } else {
-            lines
-                .iter()
-                .map(|line| {
-                    let len = line.width();
-                    if len == 0 {
-                        1
-                    } else {
-                        (len + width - 1) / width
-                    }
-                })
-                .sum()
-        };
-        let scroll = (wrapped_height as u16).saturating_sub(inner.height);
-        let paragraph = Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .scroll((scroll, 0));
-        frame.render_widget(paragraph, inner);
-    }
-
-    fn draw_progress_pane(&self, frame: &mut Frame, area: Rect, state: &TuiState) {
-        let block = Block::default().title(" Progress ").borders(Borders::ALL);
-        let visible_height = block.inner(area).height as usize;
-
-        // Find the "focus" item: first InProgress, else first non-Completed.
-        // If all complete (or empty), focus the last item so the list is bottom-justified.
-        let focus_idx = state
-            .plan
-            .iter()
-            .position(|e| e.status == CommitStatus::InProgress)
-            .or_else(|| {
-                state
-                    .plan
-                    .iter()
-                    .position(|e| e.status != CommitStatus::Completed)
-            });
-
-        // max_skip ensures we never leave blank lines at the bottom.
-        let max_skip = state.plan.len().saturating_sub(visible_height);
-        let skip = match focus_idx {
-            Some(idx) => {
-                // Center the focus item, clamped to avoid blank lines
-                let half = visible_height / 2;
-                idx.saturating_sub(half).min(max_skip)
-            }
-            None => {
-                // All complete or empty — bottom-justify (show the tail)
-                max_skip
-            }
-        };
-
-        let items: Vec<ListItem> = state
-            .plan
-            .iter()
-            .enumerate()
-            .skip(skip)
-            .take(visible_height)
-            .map(|(i, entry)| {
-                let (icon, style) = match entry.status {
-                    CommitStatus::Pending => (" ", Style::default().dim()),
-                    CommitStatus::InProgress => ("~", Style::default().fg(Color::Yellow).bold()),
-                    CommitStatus::Completed => ("x", Style::default().fg(Color::Green)),
-                    CommitStatus::Stuck => ("!", Style::default().fg(Color::Red).bold()),
-                };
-                ListItem::new(Line::styled(
-                    format!("[{icon}] {}. {}", i + 1, entry.message),
-                    style,
-                ))
-            })
-            .collect();
-
-        let list = List::new(items).block(block);
-        frame.render_widget(list, area);
-    }
+/// Create a new terminal observer and hooks pair.
+///
+/// Returns `(observer, hooks)` — pass the observer to `execute_with_hooks`
+/// as `Some(Arc::new(observer))`, and pass `&hooks` as the hooks argument.
+pub fn new() -> (TerminalObserver, TerminalHooks) {
+    let state = Arc::new(Mutex::new(StatusState::new()));
+    let observer = TerminalObserver {
+        state: state.clone(),
+    };
+    let hooks = TerminalHooks { state };
+    (observer, hooks)
 }

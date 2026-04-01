@@ -395,6 +395,7 @@ where
 
             if !build_result.success {
                 hooks.report("  Build failed, consulting LLM...");
+                hooks.report(&build_result.output);
                 if !try_fix(
                     d,
                     git,
@@ -422,6 +423,7 @@ where
 
             if !test_result.success {
                 hooks.report("  Tests failed, consulting LLM...");
+                hooks.report(&test_result.output);
                 if !try_fix(
                     d,
                     git,
