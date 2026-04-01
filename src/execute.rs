@@ -391,11 +391,10 @@ where
         // Run build if configured
         if let Some(build_cmd) = &config.build_command {
             hooks.report("  Building...");
-            let build_result = run_command(git.root(), build_cmd)?;
+            let build_result = run_command(git.root(), build_cmd, hooks)?;
 
             if !build_result.success {
                 hooks.report("  Build failed, consulting LLM...");
-                hooks.report(&build_result.output);
                 if !try_fix(
                     d,
                     git,
@@ -419,11 +418,10 @@ where
         // Run tests if configured
         if let Some(test_cmd) = &config.test_command {
             hooks.report("  Testing...");
-            let test_result = run_command(git.root(), test_cmd)?;
+            let test_result = run_command(git.root(), test_cmd, hooks)?;
 
             if !test_result.success {
                 hooks.report("  Tests failed, consulting LLM...");
-                hooks.report(&test_result.output);
                 if !try_fix(
                     d,
                     git,
@@ -726,26 +724,78 @@ fn setup_cleaned_branch<H: ExecuteHooks>(
     Ok(())
 }
 
-/// Run a shell command and capture output.
-fn run_command(repo_root: &Path, command: &str) -> Result<CommandResult, Error> {
+/// Run a shell command, streaming output through hooks and capturing it.
+fn run_command<H: ExecuteHooks>(
+    repo_root: &Path,
+    command: &str,
+    hooks: &H,
+) -> Result<CommandResult, Error> {
+    use std::io::BufRead;
+
     // Parse command into program and args (simple shell-style splitting)
     let parts: Vec<&str> = command.split_whitespace().collect();
     let (program, args) = parts
         .split_first()
         .ok_or_else(|| Error::Command(format!("empty command: {command}")))?;
 
-    let output = StdCommand::new(program)
+    let mut child = StdCommand::new(program)
         .args(args)
         .current_dir(repo_root)
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|e| Error::Command(format!("failed to run '{command}': {e}")))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Read stdout and stderr in parallel using threads
+    let stdout_reader = child.stdout.take().unwrap();
+    let stderr_reader = child.stderr.take().unwrap();
+
+    let stdout_handle = std::thread::spawn(move || {
+        let reader = std::io::BufReader::new(stdout_reader);
+        let mut lines = Vec::new();
+        for line in reader.lines() {
+            if let Ok(line) = line {
+                lines.push(line);
+            }
+        }
+        lines
+    });
+
+    let stderr_handle = std::thread::spawn(move || {
+        let reader = std::io::BufReader::new(stderr_reader);
+        let mut lines = Vec::new();
+        for line in reader.lines() {
+            if let Ok(line) = line {
+                lines.push(line);
+            }
+        }
+        lines
+    });
+
+    let stdout_lines = stdout_handle.join().unwrap_or_default();
+    let stderr_lines = stderr_handle.join().unwrap_or_default();
+
+    // Print all captured output through hooks
+    for line in &stdout_lines {
+        hooks.report(line);
+    }
+    for line in &stderr_lines {
+        hooks.report(line);
+    }
+
+    let status = child
+        .wait()
+        .map_err(|e| Error::Command(format!("failed to wait for '{command}': {e}")))?;
+
+    let mut output = stdout_lines.join("\n");
+    if !stderr_lines.is_empty() {
+        output.push('\n');
+        output.push_str(&stderr_lines.join("\n"));
+    }
 
     Ok(CommandResult {
-        success: output.status.success(),
-        output: format!("{stdout}\n{stderr}"),
+        success: status.success(),
+        output,
     })
 }
 
