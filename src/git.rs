@@ -70,6 +70,12 @@ impl Git {
         self.run_output(&["diff", &range])
     }
 
+    /// Get the diff --stat between two refs.
+    pub fn diff_stat(&self, from: &str, to: &str) -> Result<String, Error> {
+        let range = format!("{from}..{to}");
+        self.run_output(&["diff", "--stat", &range])
+    }
+
     /// Checkout files from a ref.
     pub fn checkout_files(&self, refname: &str, pathspec: &str) -> Result<(), Error> {
         self.run(&["checkout", refname, "--", pathspec])

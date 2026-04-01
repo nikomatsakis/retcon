@@ -324,9 +324,9 @@ where
     let commit_spec = &spec.commits[commit_idx];
     let mut entries = Vec::new();
 
-    // Get the diff from cleaned to source
-    let diff = git.diff(&spec.cleaned, &spec.source)?;
-    if diff.is_empty() {
+    // Check if there are remaining changes
+    let diff_stat = git.diff_stat(&spec.cleaned, &spec.source)?;
+    if diff_stat.trim().is_empty() {
         // No more changes to extract
         entries.push(HistoryEntry::Complete);
         return Ok(entries);
@@ -357,16 +357,22 @@ where
         .textln(&format!("Message: {}", commit_spec.message))
         .textln(&format!("Hints: {hints}"))
         .textln("")
-        .textln("## Available diff (cleaned..source):")
-        .textln("```diff")
-        .text(&diff)
+        .textln(&format!("## Files changed (HEAD..{}):", spec.source))
+        .textln("```")
+        .text(&diff_stat)
         .textln("```")
         .textln("")
+        .textln(&format!(
+            "To see the full diff, run: git diff HEAD {}",
+            spec.source
+        ))
+        .textln("")
         .textln("## Instructions:")
-        .textln("1. Examine current file contents if needed")
-        .textln("2. Write the relevant changes from the diff to the appropriate files")
-        .textln("3. Only include changes that belong to THIS commit based on the message and hints")
-        .textln("4. Leave other changes for subsequent commits")
+        .textln("1. Run the git diff command above to see the available changes")
+        .textln("2. Examine current file contents if needed")
+        .textln("3. Write the relevant changes to the appropriate files")
+        .textln("4. Only include changes that belong to THIS commit based on the message and hints")
+        .textln("5. Leave other changes for subsequent commits")
         .textln("")
         .textln("When done, return whether you successfully applied changes.")
         .await
@@ -464,8 +470,8 @@ where
     R: Role + HasPeer<Agent>,
     H: ExecuteHooks,
 {
-    // Get fresh diff - maybe we need to pull more from source
-    let fresh_diff = git.diff(&spec.cleaned, &spec.source)?;
+    // Get fresh diff stat - maybe we need to pull more from source
+    let fresh_diff_stat = git.diff_stat(&spec.cleaned, &spec.source)?;
 
     // Ask LLM if it can make progress
     let assess_result: AssessResult = d
@@ -479,10 +485,12 @@ where
         .text(&failure.output)
         .textln("```")
         .textln("")
-        .textln("## Remaining diff (cleaned..source):")
-        .textln("```diff")
-        .text(&fresh_diff)
+        .textln(&format!("## Remaining files changed (HEAD..{}):", spec.source))
         .textln("```")
+        .text(&fresh_diff_stat)
+        .textln("```")
+        .textln("")
+        .textln(&format!("To see the full diff, run: git diff HEAD {}", spec.source))
         .textln("")
         .textln("## Original commit:")
         .textln(&format!("Message: {}", commit_spec.message))
@@ -490,7 +498,7 @@ where
         .textln("")
         .textln("## Instructions:")
         .textln("1. Analyze the error")
-        .textln("2. Check if additional changes from the diff would fix it")
+        .textln("2. Run the git diff command to check if additional changes would fix it")
         .textln("3. If you can fix it: write the fixes to the appropriate files")
         .textln("4. If you're stuck (circular dependency, missing context, etc): report why")
         .textln("")
@@ -532,8 +540,8 @@ where
     H: ExecuteHooks,
 {
     // Check if there's any remaining diff
-    let diff = git.diff(&spec.cleaned, &spec.source)?;
-    if diff.is_empty() {
+    let diff_stat = git.diff_stat(&spec.cleaned, &spec.source)?;
+    if diff_stat.trim().is_empty() {
         return Ok(());
     }
 
@@ -565,17 +573,26 @@ where
         .textln("## Commits that were created:")
         .textln(&commit_summary)
         .textln("")
-        .textln("## Remaining diff (cleaned..source):")
-        .textln("```diff")
-        .text(&diff)
+        .textln(&format!(
+            "## Remaining files changed (HEAD..{}):",
+            spec.source
+        ))
+        .textln("```")
+        .text(&diff_stat)
         .textln("```")
         .textln("")
+        .textln(&format!(
+            "To see the full diff, run: git diff HEAD {}",
+            spec.source
+        ))
+        .textln("")
         .textln("## Instructions:")
-        .textln("1. Analyze which original commit each change logically belongs to")
-        .textln("2. Group changes by target commit")
-        .textln("3. For each group, write the changes to the appropriate files")
-        .textln("4. After each group, call create_wip_commit with the target commit number")
-        .textln("5. Apply ALL changes from the diff - don't leave anything out")
+        .textln("1. Run the git diff command above to see all remaining changes")
+        .textln("2. Analyze which original commit each change logically belongs to")
+        .textln("3. Group changes by target commit")
+        .textln("4. For each group, write the changes to the appropriate files")
+        .textln("5. After each group, call create_wip_commit with the target commit number")
+        .textln("6. Apply ALL changes from the diff - don't leave anything out")
         .textln("")
         .textln("The WIP commits will be named 'WIP--merge into <N>: <original message>'")
         .textln("so the user knows where to squash them during rebase -i.")
@@ -637,8 +654,8 @@ where
         })?;
 
     // Check if there's still a diff after LLM's attempt
-    let remaining_diff = git.diff(&spec.cleaned, &spec.source)?;
-    if remaining_diff.is_empty() {
+    let remaining_diff = git.diff_stat(&spec.cleaned, &spec.source)?;
+    if remaining_diff.trim().is_empty() {
         return Ok(());
     }
 
