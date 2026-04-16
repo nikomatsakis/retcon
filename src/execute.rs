@@ -56,6 +56,15 @@ pub trait ExecuteHooks {
     ///
     /// Called when a commit transitions between states.
     fn plan_update(&self, commit_idx: usize, status: CommitStatus) {}
+
+    /// Called when the LLM gets stuck on a commit.
+    ///
+    /// The `reason` explains why the LLM couldn't proceed.
+    /// Return `Some(response)` to auto-resolve and continue, or `None` to stop.
+    fn on_stuck(&self, reason: &str) -> Option<String> {
+        let _ = reason;
+        None
+    }
 }
 
 /// Default hooks implementation that prints to stdout.
@@ -98,22 +107,19 @@ pub async fn execute(spec_path: &Path, config: &ExecuteConfig) -> Result<(), Err
 
 /// Execute the reconstruction loop with custom hooks and an optional observer.
 ///
-/// The observer, if provided, is attached to the `Determinishtic` instance
-/// so it receives live session updates from the LLM agent.
+/// This is the outer state machine loop. Each iteration:
+/// 1. Reads the spec from disk (source of truth)
+/// 2. Runs `execute_inner` which advances as far as it can, saving after each state change
+/// 3. If stuck, prompts the user for a response
+/// 4. If the user responds, appends `Resolved` to the TOML and loops
+/// 5. If the user cancels (or all complete), exits
 pub async fn execute_with_hooks(
     spec_path: &Path,
     config: &ExecuteConfig,
     hooks: &(impl ExecuteHooks + Sync),
     observer: Option<std::sync::Arc<dyn determinishtic::ThinkObserver>>,
 ) -> Result<(), Error> {
-    // Read the spec
-    let content = std::fs::read_to_string(spec_path).map_err(|e| Error::ReadSpec {
-        path: spec_path.display().to_string(),
-        source: e,
-    })?;
-    let spec = HistorySpec::from_toml(&content)?;
-
-    // Connect to the LLM agent
+    // Connect to the LLM agent once
     hooks.report("Connecting to LLM agent...");
     let agent = AcpAgent::zed_claude_code();
     let mut d = Determinishtic::new(agent)
@@ -121,25 +127,54 @@ pub async fn execute_with_hooks(
         .map_err(|e| Error::AgentConnect { source: e.into() })?;
     hooks.report("Connected.");
 
-    // Attach observer if provided
     if let Some(obs) = observer {
         d.set_observer(obs);
     }
 
-    // Find the git repository root
     let git = Git::discover(spec_path)?;
 
-    // Execute with the provided hooks
-    let result_spec = execute_inner(&d, spec, &git, config, hooks).await;
+    loop {
+        // Read spec fresh from disk each iteration
+        let content = std::fs::read_to_string(spec_path).map_err(|e| Error::ReadSpec {
+            path: spec_path.display().to_string(),
+            source: e,
+        })?;
+        let spec = HistorySpec::from_toml(&content)?;
 
-    // Always save the spec, even on error
-    match &result_spec {
-        Ok(spec) => save_spec(spec_path, spec)?,
-        Err((spec, _)) => save_spec(spec_path, spec)?,
+        // Run one pass — this saves to disk after each state change
+        let result = execute_inner(&d, spec, &git, Some(spec_path), config, hooks).await;
+
+        // On hard error, spec was already saved by execute_inner
+        let spec = match result {
+            Ok(spec) => spec,
+            Err((_spec, e)) => return Err(e),
+        };
+
+        // Check if we're stuck and need user input
+        let stuck_commit = spec.commits.iter().position(|c| c.is_stuck());
+        if let Some(idx) = stuck_commit {
+            let reason = match spec.commits[idx].history.last() {
+                Some(HistoryEntry::Stuck(r)) => r.as_str(),
+                _ => "Unknown reason",
+            };
+
+            if let Some(response) = hooks.on_stuck(reason) {
+                // Append Resolved to the TOML and loop
+                let mut spec = spec;
+                spec.commits[idx]
+                    .history
+                    .push(HistoryEntry::Resolved(response));
+                save_spec(spec_path, &spec)?;
+                continue;
+            }
+
+            // User cancelled
+            return Ok(());
+        }
+
+        // Not stuck — we're done
+        return Ok(());
     }
-
-    // Convert to standard Result
-    result_spec.map(|_| ()).map_err(|(_, e)| e)
 }
 
 /// Execute the reconstruction loop using an existing connection.
@@ -179,17 +214,18 @@ where
     R: Role + HasPeer<Agent>,
     H: ExecuteHooks,
 {
-    execute_inner(d, spec, git, config, hooks).await
+    execute_inner(d, spec, git, None, config, hooks).await
 }
 
 /// Internal implementation shared by both execute variants.
 ///
-/// Returns the updated spec on success, or both the spec and error on failure
-/// (so progress can still be saved).
+/// Advances as far as it can in a single pass, saving the spec to disk
+/// after each state change. Returns the final spec state.
 async fn execute_inner<R, H>(
     d: &Determinishtic<R>,
     mut spec: HistorySpec,
     git: &Git,
+    spec_path: Option<&Path>,
     config: &ExecuteConfig,
     hooks: &H,
 ) -> Result<HistorySpec, (HistorySpec, Error)>
@@ -231,60 +267,79 @@ where
 
     // Process each commit
     for commit_idx in 0..spec.commits.len() {
-        let commit_spec = &spec.commits[commit_idx];
-
-        // Skip completed commits
-        if commit_spec.is_complete() {
+        // Extract state from commit before any mutation
+        if spec.commits[commit_idx].is_complete() {
             hooks.plan_update(commit_idx, CommitStatus::Completed);
             continue;
         }
+
+        if spec.commits[commit_idx].is_stuck() {
+            hooks.plan_update(commit_idx, CommitStatus::Stuck);
+            return Ok(spec);
+        }
+
+        let was_interrupted = spec.commits[commit_idx].is_started();
+        let resolution_note = spec.commits[commit_idx].resolution_note().map(String::from);
 
         hooks.plan_update(commit_idx, CommitStatus::InProgress);
         hooks.report(&format!(
             "\nCommit {}/{}: {}",
             commit_idx + 1,
             total,
-            &commit_spec.message
+            &spec.commits[commit_idx].message
         ));
 
-        // Check if stuck from previous run - require human resolution
-        if commit_spec.is_stuck() {
-            hooks.plan_update(commit_idx, CommitStatus::Stuck);
-            hooks.report("  ✗ Previously stuck - add a `resolved` entry to continue");
-            hooks.report("    Edit the spec file and add after the `stuck` entry:");
-            hooks.report("    { resolved = \"description of what you changed\" }");
-            return Ok(spec);
+        if was_interrupted {
+            hooks.report("  Resuming interrupted commit...");
         }
 
-        // If resolved, include the resolution note in context
-        let resolution_note = commit_spec.resolution_note();
-        if let Some(note) = resolution_note {
+        if let Some(note) = &resolution_note {
             hooks.report(&format!("  Resolved: {note}"));
         }
 
+        // Record Started and save before doing any work
+        if !was_interrupted {
+            spec.commits[commit_idx].history.push(HistoryEntry::Started);
+            if let Some(p) = spec_path {
+                save_spec(p, &spec).map_err(|e| (spec.clone(), e))?;
+            }
+        }
+
         // Run the reconstruction for this commit
-        let result =
-            reconstruct_commit(d, git, &spec, commit_idx, resolution_note, config, hooks).await;
+        let result = reconstruct_commit(
+            d,
+            git,
+            &spec,
+            commit_idx,
+            was_interrupted,
+            resolution_note.as_deref(),
+            config,
+            hooks,
+        )
+        .await;
 
         match result {
             Ok(entries) => {
-                // Append history entries
                 spec.commits[commit_idx].history.extend(entries);
+                if let Some(p) = spec_path {
+                    save_spec(p, &spec).map_err(|e| (spec.clone(), e))?;
+                }
 
                 if spec.commits[commit_idx].is_complete() {
                     hooks.plan_update(commit_idx, CommitStatus::Completed);
                     hooks.report("  ✓ Commit complete");
                 } else if spec.commits[commit_idx].is_stuck() {
                     hooks.plan_update(commit_idx, CommitStatus::Stuck);
-                    hooks.report("  ✗ Stuck - stopping");
                     return Ok(spec);
                 }
             }
             Err(e) => {
-                // Record the error and stop
                 spec.commits[commit_idx]
                     .history
                     .push(HistoryEntry::Stuck(e.to_string()));
+                if let Some(p) = spec_path {
+                    let _ = save_spec(p, &spec);
+                }
                 hooks.plan_update(commit_idx, CommitStatus::Stuck);
                 return Err((spec, e));
             }
@@ -313,6 +368,7 @@ async fn reconstruct_commit<R, H>(
     git: &Git,
     spec: &HistorySpec,
     commit_idx: usize,
+    was_interrupted: bool,
     resolution_note: Option<&str>,
     config: &ExecuteConfig,
     hooks: &H,
@@ -344,6 +400,13 @@ where
         })
         .unwrap_or_default();
 
+    // Build interrupted context if resuming after Ctrl-C
+    let interrupted_context = if was_interrupted {
+        "\n## Note: A previous run was interrupted.\nThere may be partial changes already in the working directory. Check the current state of files before making changes.\n"
+    } else {
+        ""
+    };
+
     // First pass: extract and apply changes
     let extract_result: ExtractResult = d
         .think()
@@ -352,6 +415,7 @@ where
         .textln("You are reconstructing clean git history from a messy branch.")
         .textln("Your job is to extract ONLY the changes relevant to this commit.")
         .text(&resolution_context)
+        .text(interrupted_context)
         .textln("")
         .textln("## Commit to create:")
         .textln(&format!("Message: {}", commit_spec.message))

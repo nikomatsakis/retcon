@@ -41,6 +41,9 @@ pub struct CommitSpec {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HistoryEntry {
+    /// Execution started on this commit (may have partial changes in working dir)
+    Started,
+
     /// A commit was created (main or WIP fix)
     CommitCreated(String),
 
@@ -91,6 +94,12 @@ impl CommitSpec {
     #[must_use]
     pub fn is_stuck(&self) -> bool {
         matches!(self.history.last(), Some(HistoryEntry::Stuck(_)))
+    }
+
+    /// Check if this commit was started but interrupted (e.g., Ctrl-C).
+    #[must_use]
+    pub fn is_started(&self) -> bool {
+        matches!(self.history.last(), Some(HistoryEntry::Started))
     }
 
     /// Check if this commit was stuck but has been resolved by a human.

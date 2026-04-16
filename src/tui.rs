@@ -252,6 +252,31 @@ impl ExecuteHooks for TerminalHooks {
         state.clear_status_line();
         state.draw_status_line();
     }
+
+    fn on_stuck(&self, reason: &str) -> Option<String> {
+        let mut state = self.state.lock().unwrap();
+        state.clear_status_line();
+        state.println_styled(&format!("  ✗ Stuck: {reason}"), Color::Red, true);
+        drop(state);
+
+        println!();
+        println!("Type your response to resume, or press Esc/Ctrl-C to stop:");
+        print!("> ");
+        let _ = io::stdout().flush();
+
+        let mut input = String::new();
+        match io::stdin().read_line(&mut input) {
+            Ok(0) | Err(_) => None,
+            Ok(_) => {
+                let trimmed = input.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            }
+        }
+    }
 }
 
 // =============================================================================
