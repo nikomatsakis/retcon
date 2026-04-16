@@ -80,6 +80,13 @@ Design a commit sequence that tells a clear story, following these default princ
   - `test:` adding or updating tests
   - `docs:` documentation changes
   - `chore:` maintenance tasks
+- You MUST write commit messages with a title AND a body:
+  - The title summarizes WHAT changed (concise, conventional commit style)
+  - The body explains WHY — tell the story of the PR
+  - If a commit enables something in a future commit, say so
+  - If a refactoring is preparation for a feature, explain what it enables
+  - Readers can see the code for the WHAT; the WHY is what matters
+  - Separate title and body with a blank line
 
 ### 5. Write the TOML Specification
 
@@ -95,7 +102,11 @@ remote = "origin/main"              # Target branch for merge
 cleaned = "feature-branch-clean"    # New branch to create
 
 [[commit]]
-message = "type: concise description of the change"
+message = """type: concise description of the change
+
+Explain WHY this change is being made. Tell the story — if this
+enables a future commit, say so. Readers can see the WHAT in the
+code; the WHY is what matters."""
 hints = """
 Detailed guidance for extracting this commit:
 - Which files to modify
@@ -152,7 +163,11 @@ remote = "origin/main"
 cleaned = "feature-oauth-clean"
 
 [[commit]]
-message = "refactor: extract validation logic to dedicated module"
+message = """refactor: extract validation logic to dedicated module
+
+The OAuth feature needs to hook into validation at several points.
+Pulling validation into its own module first makes those integration
+points clear and keeps the OAuth commit focused on new functionality."""
 hints = """
 Move validate_user() and validate_session() from lib.rs to validation.rs.
 Include the ValidationError enum.
@@ -161,7 +176,12 @@ Do NOT include any OAuth-related changes.
 """
 
 [[commit]]
-message = "feat: add OAuth provider authentication"
+message = """feat: add OAuth provider authentication
+
+Adds pluggable OAuth support with Google and GitHub as initial providers.
+Token refresh is handled transparently so callers don't need to manage
+token lifecycle. This builds on the extracted validation module to
+validate OAuth sessions through the same pipeline as password auth."""
 hints = """
 New oauth.rs module with OAuthProvider trait.
 Includes Google and GitHub implementations.
@@ -170,7 +190,11 @@ Exclude debug logging (removed in final state anyway).
 """
 
 [[commit]]
-message = "test: update tests for OAuth support"
+message = """test: update tests for OAuth support
+
+Covers the new OAuth flow end-to-end with a mock provider, plus
+regression tests for the validation extraction to make sure existing
+password auth still works through the new module structure."""
 hints = """
 Test updates in tests/auth_test.rs.
 New mock provider for testing.
