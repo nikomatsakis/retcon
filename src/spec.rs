@@ -50,6 +50,9 @@ pub enum HistoryEntry {
     /// Human resolved a stuck state - describes what changed
     Resolved(String),
 
+    /// Pre-configured response to send to the LLM on stuck - auto-resolves
+    Response(String),
+
     /// This logical commit is done
     Complete,
 }
@@ -92,17 +95,20 @@ impl CommitSpec {
 
     /// Check if this commit was stuck but has been resolved by a human.
     ///
-    /// Returns `true` if the last entry is `Resolved`.
+    /// Returns `true` if the last entry is `Resolved` or `Response`.
     #[must_use]
     pub fn is_resolved(&self) -> bool {
-        matches!(self.history.last(), Some(HistoryEntry::Resolved(_)))
+        matches!(
+            self.history.last(),
+            Some(HistoryEntry::Resolved(_) | HistoryEntry::Response(_))
+        )
     }
 
     /// Get the resolution note if this commit was resolved.
     #[must_use]
     pub fn resolution_note(&self) -> Option<&str> {
         match self.history.last() {
-            Some(HistoryEntry::Resolved(note)) => Some(note),
+            Some(HistoryEntry::Resolved(note) | HistoryEntry::Response(note)) => Some(note),
             _ => None,
         }
     }
