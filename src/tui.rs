@@ -260,7 +260,7 @@ impl ExecuteHooks for TerminalHooks {
         drop(state);
 
         println!();
-        println!("Type your response to resume, or press Esc/Ctrl-C to stop:");
+        println!("Type your response to resume, SKIP to skip this commit, or Esc/Ctrl-C to stop:");
         print!("> ");
         let _ = io::stdout().flush();
 

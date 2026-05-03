@@ -167,11 +167,16 @@ pub async fn execute_with_hooks(
             };
 
             if let Some(response) = hooks.on_stuck(reason) {
-                // Append Resolved to the TOML and loop
                 let mut spec = spec;
-                spec.commits[idx]
-                    .history
-                    .push(HistoryEntry::Resolved(response));
+                if response == "SKIP" {
+                    // Skip this commit entirely
+                    spec.commits[idx].history.push(HistoryEntry::Complete);
+                } else {
+                    // Append Resolved to the TOML and loop
+                    spec.commits[idx]
+                        .history
+                        .push(HistoryEntry::Resolved(response));
+                }
                 save_spec(spec_path, &spec)?;
                 continue;
             }
@@ -245,7 +250,7 @@ where
     let verify_idx = total; // index of the "verify" entry in the plan
 
     // Initialize the plan: all commits + a final "verify" step
-    let mut plan_messages: Vec<&str> = spec.commits.iter().map(|c| c.message.as_str()).collect();
+    let mut plan_messages: Vec<&str> = spec.commits.iter().map(|c| c.message.lines().next().unwrap_or("")).collect();
     plan_messages.push("Verify branch matches source");
     hooks.plan_init(&plan_messages);
 
@@ -267,7 +272,7 @@ where
             "Resuming from commit {}/{}: {}",
             start_idx + 1,
             total,
-            &spec.commits[start_idx].message
+            spec.commits[start_idx].message.lines().next().unwrap_or("")
         ));
     } else {
         hooks.report("All commits complete, verifying final state...");
@@ -294,7 +299,7 @@ where
             "\nCommit {}/{}: {}",
             commit_idx + 1,
             total,
-            &spec.commits[commit_idx].message
+            spec.commits[commit_idx].message.lines().next().unwrap_or("")
         ));
 
         if was_interrupted {
