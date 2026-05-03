@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
+use serde::Deserialize;
 
 #[derive(Parser)]
 #[command(name = "retcon")]
@@ -20,6 +21,10 @@ enum Command {
     Execute {
         /// Path to the history specification TOML file
         plan: PathBuf,
+
+        /// Agent command to use for LLM work (e.g. "npx -y @zed-industries/claude-code-acp@latest")
+        #[arg(long)]
+        agent: Option<String>,
 
         /// Build command to run after each commit (default: cargo check --all --workspace)
         #[arg(long)]
@@ -41,9 +46,28 @@ enum SkipStep {
     Test,
 }
 
+/// Config loaded from ~/.retcon/config.toml
+#[derive(Debug, Default, Deserialize)]
+struct Config {
+    #[serde(default)]
+    agent: Option<String>,
+}
+
+fn load_config() -> Config {
+    let Some(home) = dirs::home_dir() else {
+        return Config::default();
+    };
+    let path = home.join(".retcon").join("config.toml");
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| toml::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let config_file = load_config();
 
     match cli.command {
         Command::Prompt => {
@@ -51,6 +75,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Execute {
             plan,
+            agent,
             build_command,
             test_command,
             skip,
@@ -69,6 +94,7 @@ async fn main() -> anyhow::Result<()> {
                 } else {
                     Some(test_command.unwrap_or_else(|| "cargo test --all --workspace".to_string()))
                 },
+                agent: agent.or(config_file.agent),
             };
 
             let (observer, hooks) = retcon::tui::new();

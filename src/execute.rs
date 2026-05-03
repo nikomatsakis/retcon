@@ -2,6 +2,7 @@
 
 use std::path::Path;
 use std::process::Command as StdCommand;
+use std::str::FromStr;
 
 use determinishtic::Determinishtic;
 use sacp::Agent;
@@ -90,6 +91,8 @@ pub struct ExecuteConfig {
     pub build_command: Option<String>,
     /// Test command to run after build passes. None means skip tests.
     pub test_command: Option<String>,
+    /// Agent command string. None means use default (zed_claude_code).
+    pub agent: Option<String>,
 }
 
 /// Execute the reconstruction loop for the given spec file.
@@ -121,7 +124,12 @@ pub async fn execute_with_hooks(
 ) -> Result<(), Error> {
     // Connect to the LLM agent once
     hooks.report("Connecting to LLM agent...");
-    let agent = AcpAgent::zed_claude_code();
+    let agent = match &config.agent {
+        Some(cmd) => AcpAgent::from_str(cmd).map_err(|e| Error::Agent {
+            message: format!("invalid agent command: {e}"),
+        })?,
+        None => AcpAgent::zed_claude_code(),
+    };
     let mut d = Determinishtic::new(agent)
         .await
         .map_err(|e| Error::AgentConnect { source: e.into() })?;

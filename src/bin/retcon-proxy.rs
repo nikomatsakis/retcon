@@ -315,6 +315,7 @@ async fn execute_tool(
                 .test_command
                 .or_else(|| Some("cargo test --all --workspace".to_string()))
         },
+        agent: None,
     };
 
     // 4. Create Determinishtic and AcpHooks from the connection
