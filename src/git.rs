@@ -93,6 +93,13 @@ impl Git {
         self.head_short()
     }
 
+    /// Create a fixup commit targeting the given commit hash.
+    pub fn commit_fixup(&self, target: &str) -> Result<String, Error> {
+        self.add_all()?;
+        self.run(&["commit", "--fixup", target])?;
+        self.head_short()
+    }
+
     /// Get the short hash of HEAD.
     pub fn head_short(&self) -> Result<String, Error> {
         let hash = self.run_output(&["rev-parse", "HEAD"])?;

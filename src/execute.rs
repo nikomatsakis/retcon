@@ -594,11 +594,17 @@ where
         return Ok(false);
     }
 
-    // LLM made fixes, create a WIP commit
-    let wip_message = format!("WIP: fix for {}", commit_spec.message);
-    let hash = git.commit(&wip_message)?;
+    // LLM made fixes, create a fixup commit targeting the original
+    let target_hash = entries
+        .iter()
+        .find_map(|e| match e {
+            HistoryEntry::CommitCreated(h) => Some(h.as_str()),
+            _ => None,
+        })
+        .unwrap_or("HEAD");
+    let hash = git.commit_fixup(target_hash)?;
     entries.push(HistoryEntry::CommitCreated(hash));
-    hooks.report("  Created WIP commit");
+    hooks.report("  Created fixup commit");
 
     Ok(true)
 }
@@ -622,7 +628,7 @@ where
         return Ok(());
     }
 
-    hooks.report("\nRemaining changes detected - creating WIP commits...");
+    hooks.report("\nRemaining changes detected - creating fixup commits...");
 
     // Build a summary of commits that were created
     let commit_summary: String = spec
@@ -633,19 +639,30 @@ where
         .collect::<Vec<_>>()
         .join("\n");
 
+    // Collect the first commit hash for each logical commit (fixup target)
+    let commit_hashes: Vec<Option<String>> = spec
+        .commits
+        .iter()
+        .map(|c| {
+            c.history.iter().find_map(|e| match e {
+                HistoryEntry::CommitCreated(h) => Some(h.clone()),
+                _ => None,
+            })
+        })
+        .collect();
+
     // We need the root path for the tool closure
     let repo_root = git.root().to_path_buf();
-    let commits = spec.commits.clone();
     let source = spec.source.clone();
 
-    // Ask LLM to analyze and create WIP commits
+    // Ask LLM to analyze and create fixup commits
     let _result: CatchallResult = d
         .think()
-        .textln("# Task: Create WIP commits for remaining changes")
+        .textln("# Task: Create fixup commits for remaining changes")
         .textln("")
         .textln("The main reconstruction is complete, but some changes were missed.")
-        .textln("Your job is to apply ALL remaining changes, creating WIP commits that indicate")
-        .textln("which original commit they should be merged into during interactive rebase.")
+        .textln("Your job is to apply ALL remaining changes, creating fixup commits that")
+        .textln("will be automatically squashed into the right commit during rebase --autosquash.")
         .textln("")
         .textln("## Commits that were created:")
         .textln(&commit_summary)
@@ -668,27 +685,29 @@ where
         .textln("2. Analyze which original commit each change logically belongs to")
         .textln("3. Group changes by target commit")
         .textln("4. For each group, write the changes to the appropriate files")
-        .textln("5. After each group, call create_wip_commit with the target commit number")
+        .textln("5. After each group, call create_fixup_commit with the target commit number")
         .textln("6. Apply ALL changes from the diff - don't leave anything out")
-        .textln("")
-        .textln("The WIP commits will be named 'WIP--merge into <N>: <original message>'")
-        .textln("so the user knows where to squash them during rebase -i.")
         .define_tool(
-            "create_wip_commit",
-            "Create a WIP commit for changes that belong to a specific original commit",
+            "create_fixup_commit",
+            "Create a fixup commit for changes that belong to a specific original commit",
             {
                 let repo = repo_root.clone();
-                let commits = commits.clone();
+                let commit_hashes = commit_hashes.clone();
                 async move |input: CreateWipCommitInput, _cx| {
                     let target_idx = input.target_commit_number.saturating_sub(1);
-                    let target_message = commits
+                    let target_hash = commit_hashes
                         .get(target_idx)
-                        .map_or("unknown", |c| c.message.as_str());
+                        .and_then(|h| h.as_deref());
 
-                    let wip_message = format!(
-                        "WIP--merge into {}: {}",
-                        input.target_commit_number, target_message
-                    );
+                    let Some(target_hash) = target_hash else {
+                        return Ok(CreateWipCommitOutput {
+                            wip_message: None,
+                            error: Some(format!(
+                                "No commit hash found for commit {}",
+                                input.target_commit_number
+                            )),
+                        });
+                    };
 
                     // Stage and commit
                     let status = StdCommand::new("git")
@@ -704,7 +723,7 @@ where
                     }
 
                     let status = StdCommand::new("git")
-                        .args(["commit", "-m", &wip_message])
+                        .args(["commit", "--fixup", target_hash])
                         .current_dir(&repo)
                         .status();
 
@@ -715,10 +734,8 @@ where
                         });
                     }
 
-                    // Note: We can't call hooks here since we're inside the closure
-                    // The hook callback happens after the think() completes
                     Ok(CreateWipCommitOutput {
-                        wip_message: Some(wip_message),
+                        wip_message: Some(format!("fixup! {target_hash}")),
                         error: None,
                     })
                 }
@@ -741,10 +758,10 @@ where
     git.checkout_files(&source, ".")?;
     let _hash = git.commit("WIP--remaining changes (review manually)")?;
 
-    hooks.report("  Created: WIP--remaining changes (review manually)");
+    hooks.report("  Created: remaining uncategorized changes (review manually)");
     hooks.report("\n⚠ Warning: Some changes could not be automatically categorized.");
-    hooks.report("  Please review the 'WIP--remaining changes' commit and distribute");
-    hooks.report("  its contents to the appropriate commits during interactive rebase.");
+    hooks.report("  Review the final commit and distribute its contents using");
+    hooks.report("  git rebase -i --autosquash");
 
     Ok(())
 }
